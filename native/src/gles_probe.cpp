@@ -739,11 +739,26 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
         if (pt.action == 10) {
             if (pt.done) {
-                g_vbBinds.clear();
-                for (auto& pr : pt.binds) { VbBind vb; vb.idx = pr.first; vb.newBuf = pr.second; g_vbBinds.push_back(vb); }
-                continue;
+                if (pt.perm < 0) {
+                    // 轮换模式: 每 120 次命中换一种轴置换
+                    if (++pt.hits >= 120) {
+                        pt.hits = 0;
+                        pt.perm = (pt.perm + 1) % 6;
+                        pt.done = false;
+                        LOGI("vbmod CYCLE perm=%d", pt.perm);
+                    } else {
+                        g_vbBinds.clear();
+                        for (auto& pr : pt.binds) { VbBind vb; vb.idx = pr.first; vb.newBuf = pr.second; g_vbBinds.push_back(vb); }
+                        continue;
+                    }
+                } else {
+                    g_vbBinds.clear();
+                    for (auto& pr : pt.binds) { VbBind vb; vb.idx = pr.first; vb.newBuf = pr.second; g_vbBinds.push_back(vb); }
+                    continue;
+                }
             }
             pt.done = true;
+            pt.binds.clear();
             if (pt.ib.empty() || pt.blend.empty()) continue;
             LiveAttr la[16];
             capture_vao(la);
