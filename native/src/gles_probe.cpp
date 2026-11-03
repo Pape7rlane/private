@@ -1156,7 +1156,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
 void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawElements, "glDrawElements");
     int act = on_draw("", mode, count, type, indices);
-    if (act == 1) return;
+    if (act == 1) { g_vbBinds.clear(); return; }
     apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
@@ -1171,7 +1171,7 @@ void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* in
 void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n) {
     RESOLVE(o_glDrawElementsInstanced, "glDrawElementsInstanced");
     int act = on_draw("I", mode, count, type, indices);
-    if (act == 1) return;
+    if (act == 1) { g_vbBinds.clear(); return; }
     apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
@@ -1186,7 +1186,7 @@ void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const
 void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawRangeElements, "glDrawRangeElements");
     int act = on_draw("R", mode, count, type, indices);
-    if (act == 1) return;
+    if (act == 1) { g_vbBinds.clear(); return; }
     apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
@@ -1203,7 +1203,7 @@ void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei cou
 void glDrawElementsBaseVertex_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
     RESOLVE(o_glDrawElementsBaseVertex, "glDrawElementsBaseVertex");
     int act = on_draw("B", mode, count, type, indices, basevertex);
-    if (act == 1) return;
+    if (act == 1) { g_vbBinds.clear(); return; }
     apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
@@ -1220,7 +1220,7 @@ void glDrawElementsBaseVertex_hook(GLenum mode, GLsizei count, GLenum type, cons
 void glDrawElementsInstancedBaseVertex_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n, GLint basevertex) {
     RESOLVE(o_glDrawElementsInstancedBaseVertex, "glDrawElementsInstancedBaseVertex");
     int act = on_draw("IB", mode, count, type, indices, basevertex);
-    if (act == 1) return;
+    if (act == 1) { g_vbBinds.clear(); return; }
     apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
