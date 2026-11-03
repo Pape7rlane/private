@@ -6,3 +6,10 @@ local.properties
 *.jks
 *.keystore
 .DS_Store
+tools/mdscan
+tools/peek
+tools/proc_scan
+tools/memdump
+tools/ptrscan
+tools/findxref
+tools/slice
