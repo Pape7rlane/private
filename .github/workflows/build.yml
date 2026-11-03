@@ -45,12 +45,15 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      # 用仓库里固定的 ci.jks, 保证每次构建签名一致, 可以直接覆盖安装
       - name: Keystore
-        run: >
-          keytool -genkeypair -v -keystore app/ci.jks -alias ci
-          -keyalg RSA -keysize 2048 -validity 10000
-          -storepass android -keypass android
-          -dname "CN=ci,OU=ci,O=ci,L=ci,ST=ci,C=CN"
+        run: |
+          if [ ! -f app/ci.jks ]; then
+            keytool -genkeypair -v -keystore app/ci.jks -alias ci \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=ci,OU=ci,O=ci,L=ci,ST=ci,C=CN"
+          fi
 
       - name: Build
         run: gradle assembleRelease --no-daemon

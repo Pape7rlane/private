@@ -1,10 +1,11 @@
-// gles_probe.cpp — HSR Android GLES probe
-// libunity.so 只 import egl* 符号, 所有 gl* 都经 eglGetProcAddress 拿.
-// 因此 hook eglGetProcAddress 就能拦到全部 GL 调用.
-// 目的: 抓 index buffer 内容哈希 + 索引数 = 3Dmigoto/SRMI ini 里的 hash 键.
+// gles_probe.cpp — HSR Android GLES probe (P1)
+// libunity.so 没有 gl* 的 UND 符号, 只能靠运行时解析.
+// 这里同时 hook eglGetProcAddress 和 dlsym, 记录名字 + drawcall 索引缓冲哈希.
 #include <android/log.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <cerrno>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -26,10 +27,10 @@ extern "C" const char* hsr_out_dir();
 namespace {
 
 typedef void* (*PFNEGLGETPROCADDRESSPROC)(const char*);
+typedef void* (*PFNDLSYM)(void*, const char*);
 
 PFNEGLGETPROCADDRESSPROC o_eglGetProcAddress = nullptr;
-
-// ---------------------------------------------------------------- 状态
+PFNDLSYM                o_dlsym            = nullptr;
 
 struct Attr {
     bool    has    = false;
@@ -45,9 +46,9 @@ struct VaoState {
 };
 
 struct BufInfo {
-    GLsizeiptr size = 0;
-    uint64_t   h1   = 0;   // fnv-1  32
-    uint64_t   h1a  = 0;   // fnv-1a 32
+    GLsizeiptr size   = 0;
+    uint64_t   h1     = 0;
+    uint64_t   h1a    = 0;
     GLenum     target = 0;
 };
 
@@ -58,13 +59,41 @@ GLuint g_curVao   = 0;
 GLuint g_curArray = 0;
 GLuint g_curProg  = 0;
 
-uint64_t g_draws      = 0;
-uint64_t g_unique     = 0;
-std::unordered_set<uint64_t> g_seen;
-FILE*    g_fp = nullptr;
-bool     g_fileTried = false;
+std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0},
+                      c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0};
 
-// ---------------------------------------------------------------- 工具
+uint64_t g_unique = 0;
+std::unordered_set<uint64_t> g_seen;
+
+FILE* g_fp      = nullptr;
+FILE* g_fpNames = nullptr;
+bool  g_fileTried = false;
+
+bool open_out() {
+    if (g_fileTried) return g_fp != nullptr;
+    g_fileTried = true;
+    const char* d = hsr_out_dir();
+    LOGE("out dir = '%s'", d ? d : "(null)");
+    if (!d || !*d) return false;
+    std::string a = std::string(d) + "/gles.tsv";
+    g_fp = fopen(a.c_str(), "w");
+    if (!g_fp) { LOGE("fopen %s failed errno=%d", a.c_str(), errno); }
+    else {
+        fprintf(g_fp, "# vao\telem_buf\tib_fnv1\tib_fnv1a\tidx_count\tidx_type\tmode\tprogram\tkind\tvtx_layout\n");
+        fflush(g_fp);
+    }
+    std::string b = std::string(d) + "/eglnames.txt";
+    g_fpNames = fopen(b.c_str(), "w");
+    if (!g_fpNames) LOGE("fopen %s failed errno=%d", b.c_str(), errno);
+    return g_fp != nullptr;
+}
+
+void log_name(const char* who, const char* name) {
+    open_out();
+    if (!g_fpNames || !name) return;
+    fprintf(g_fpNames, "%s\t%s\n", who, name);
+    fflush(g_fpNames);
+}
 
 uint32_t fnv1_32(const uint8_t* p, size_t n) {
     uint32_t h = 2166136261u;
@@ -78,24 +107,10 @@ uint32_t fnv1a_32(const uint8_t* p, size_t n) {
     return h;
 }
 
-FILE* out() {
-    if (g_fp || g_fileTried) return g_fp;
-    g_fileTried = true;
-    const char* d = hsr_out_dir();
-    if (!d || !*d) return nullptr;
-    std::string p = std::string(d) + "/gles.tsv";
-    g_fp = fopen(p.c_str(), "w");
-    if (!g_fp) { LOGE("cannot open %s", p.c_str()); return nullptr; }
-    fprintf(g_fp,
-            "# vao\telem_buf\tib_fnv1\tib_fnv1a\tidx_count\tidx_type\tmode\tprogram\tvtx_layout\n");
-    fflush(g_fp);
-    return g_fp;
-}
-
 void* gl_real(const char* name) {
     void* p = nullptr;
     if (o_eglGetProcAddress) p = o_eglGetProcAddress(name);
-    if (!p) p = dlsym(RTLD_DEFAULT, name);
+    if (!p && o_dlsym) p = o_dlsym(RTLD_DEFAULT, name);
     return p;
 }
 
@@ -103,8 +118,6 @@ GLuint cur_elem() {
     auto it = g_vaos.find(g_curVao);
     return it == g_vaos.end() ? 0 : it->second.elem;
 }
-
-// ---------------------------------------------------------------- gl* 实现指针
 
 decltype(&glBindBuffer)      o_glBindBuffer      = nullptr;
 decltype(&glBindVertexArray) o_glBindVertexArray = nullptr;
@@ -124,9 +137,8 @@ decltype(&glDrawRangeElements) o_glDrawRangeElements = nullptr;
         if (!(slot)) { LOGE("no real %s", name); return; }      \
     } while (0)
 
-// ---------------------------------------------------------------- buffer 记录
-
 void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
+    if (!id) return;
     BufInfo& b = g_bufs[id];
     b.size   = size;
     b.target = target;
@@ -137,20 +149,17 @@ void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
     }
 }
 
-// ---------------------------------------------------------------- hooks
-
 void glBindBuffer_hook(GLenum target, GLuint buffer) {
     RESOLVE(o_glBindBuffer, "glBindBuffer");
-    if (target == GL_ELEMENT_ARRAY_BUFFER) {
-        g_vaos[g_curVao].elem = buffer;
-    } else if (target == GL_ARRAY_BUFFER) {
-        g_curArray = buffer;
-    }
+    c_bindBuf++;
+    if (target == GL_ELEMENT_ARRAY_BUFFER) g_vaos[g_curVao].elem = buffer;
+    else if (target == GL_ARRAY_BUFFER)    g_curArray = buffer;
     o_glBindBuffer(target, buffer);
 }
 
 void glBindVertexArray_hook(GLuint array) {
     RESOLVE(o_glBindVertexArray, "glBindVertexArray");
+    c_vao++;
     g_curVao = array;
     o_glBindVertexArray(array);
 }
@@ -168,9 +177,10 @@ void glDeleteBuffers_hook(GLsizei n, const GLuint* buffers) {
 
 void glBufferData_hook(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     RESOLVE(o_glBufferData, "glBufferData");
+    c_bufData++;
     if (data && size > 0) {
         GLuint id = (target == GL_ELEMENT_ARRAY_BUFFER) ? cur_elem() : g_curArray;
-        if (id) record_index(id, size, data, target);
+        record_index(id, size, data, target);
     }
     o_glBufferData(target, size, data, usage);
 }
@@ -178,14 +188,14 @@ void glBufferData_hook(GLenum target, GLsizeiptr size, const void* data, GLenum 
 void glBufferSubData_hook(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
     RESOLVE(o_glBufferSubData, "glBufferSubData");
     if (data && size > 0 && target == GL_ELEMENT_ARRAY_BUFFER) {
-        GLuint id = cur_elem();
-        if (id) record_index(id, size, data, target);
+        record_index(cur_elem(), size, data, target);
     }
     o_glBufferSubData(target, offset, size, data);
 }
 
 void glUseProgram_hook(GLuint program) {
     RESOLVE(o_glUseProgram, "glUseProgram");
+    c_useProg++;
     g_curProg = program;
     o_glUseProgram(program);
 }
@@ -193,6 +203,7 @@ void glUseProgram_hook(GLuint program) {
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
                                 GLsizei stride, const void* pointer) {
     RESOLVE(o_glVertexAttribPointer, "glVertexAttribPointer");
+    c_attrib++;
     if (index < 16) {
         Attr& a = g_vaos[g_curVao].attr[index];
         a.has = true; a.size = size; a.type = type; a.stride = stride; a.buf = g_curArray;
@@ -214,96 +225,129 @@ std::string layout_of(GLuint vao) {
     return s;
 }
 
-void on_draw(GLenum mode, GLsizei count, GLenum type, const void* indices) {
-    g_draws++;
+
+void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    c_draw++;
     GLuint eb = cur_elem();
     uint64_t h1 = 0, h1a = 0;
     GLsizeiptr bsz = 0;
     auto it = g_bufs.find(eb);
     if (it != g_bufs.end()) { h1 = it->second.h1; h1a = it->second.h1a; bsz = it->second.size; }
 
+    if (!eb && indices && count > 0) {
+        size_t bytes = (size_t)count * (type == GL_UNSIGNED_INT ? 4 : 2);
+        if (bytes <= (16 << 20)) {
+            h1  = fnv1_32((const uint8_t*)indices, bytes);
+            h1a = fnv1a_32((const uint8_t*)indices, bytes);
+            bsz = (GLsizeiptr)bytes;
+        }
+    }
+
     uint64_t key = (h1 << 20) ^ ((uint64_t)count << 4) ^ (uint64_t)type ^ ((uint64_t)mode << 40);
-    bool fresh = g_seen.insert(key).second;
-    if (!fresh || g_unique >= 5000) return;
+    if (!g_seen.insert(key).second || g_unique >= 5000) return;
     g_unique++;
 
     std::string lay = layout_of(g_curVao);
-    if (FILE* f = out()) {
-        fprintf(f, "%u\t%u\t%08llx\t%08llx\t%d\t%x\t%x\t%u\t%s\n",
+    if (open_out()) {
+        fprintf(g_fp, "%u\t%u\t%08llx\t%08llx\t%d\t%x\t%x\t%u\t%s\t%s\n",
                 g_curVao, eb, (unsigned long long)h1, (unsigned long long)h1a,
-                (int)count, type, mode, g_curProg, lay.c_str());
-        fflush(f);
+                (int)count, type, mode, g_curProg, kind, lay.c_str());
+        fflush(g_fp);
     }
-    if (g_unique <= 200) {
-        LOGI("DRAW vao=%u eb=%u sz=%lld h1=%08llx h1a=%08llx cnt=%d type=%x mode=%x prog=%u %s",
-             g_curVao, eb, (long long)bsz, (unsigned long long)h1, (unsigned long long)h1a,
-             (int)count, type, mode, g_curProg, lay.c_str());
+    if (g_unique <= 300) {
+        LOGI("DRAW%s vao=%u eb=%u sz=%lld h1=%08llx h1a=%08llx cnt=%d type=%x mode=%x prog=%u %s",
+             kind, g_curVao, eb, (long long)bsz, (unsigned long long)h1,
+             (unsigned long long)h1a, (int)count, type, mode, g_curProg, lay.c_str());
+    }
+    if (g_unique % 100 == 0) {
+        LOGI("STAT unique=%llu draws=%llu egl=%llu dlsym=%llu bindBuf=%llu vao=%llu bufData=%llu useProg=%llu attrib=%llu",
+             (unsigned long long)g_unique, (unsigned long long)c_draw.load(),
+             (unsigned long long)c_egl.load(), (unsigned long long)c_dlsym.load(),
+             (unsigned long long)c_bindBuf.load(), (unsigned long long)c_vao.load(),
+             (unsigned long long)c_bufData.load(), (unsigned long long)c_useProg.load(),
+             (unsigned long long)c_attrib.load());
     }
 }
 
 void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawElements, "glDrawElements");
-    on_draw(mode, count, type, indices);
+    on_draw("", mode, count, type, indices);
     o_glDrawElements(mode, count, type, indices);
 }
 
 void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const void* indices,
                                   GLsizei n) {
     RESOLVE(o_glDrawElementsInstanced, "glDrawElementsInstanced");
-    on_draw(mode, count, type, indices);
+    on_draw("I", mode, count, type, indices);
     o_glDrawElementsInstanced(mode, count, type, indices, n);
 }
 
 void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
                               const void* indices) {
     RESOLVE(o_glDrawRangeElements, "glDrawRangeElements");
-    on_draw(mode, count, type, indices);
+    on_draw("R", mode, count, type, indices);
     o_glDrawRangeElements(mode, start, end, count, type, indices);
 }
-
-// ---------------------------------------------------------------- eglGetProcAddress
 
 struct Entry { const char* name; void* fn; };
 
 const Entry kEntries[] = {
-    {"glBindBuffer",              (void*)&glBindBuffer_hook},
-    {"glBindVertexArray",         (void*)&glBindVertexArray_hook},
-    {"glGenBuffers",              (void*)&glGenBuffers_hook},
-    {"glDeleteBuffers",           (void*)&glDeleteBuffers_hook},
-    {"glBufferData",              (void*)&glBufferData_hook},
-    {"glBufferSubData",           (void*)&glBufferSubData_hook},
-    {"glUseProgram",              (void*)&glUseProgram_hook},
-    {"glVertexAttribPointer",     (void*)&glVertexAttribPointer_hook},
-    {"glDrawElements",            (void*)&glDrawElements_hook},
-    {"glDrawElementsInstanced",   (void*)&glDrawElementsInstanced_hook},
-    {"glDrawRangeElements",       (void*)&glDrawRangeElements_hook},
-    // GLES2 扩展名, 老路径可能用这些
-    {"glBindVertexArrayOES",      (void*)&glBindVertexArray_hook},
-    {"glDrawElementsOES",         (void*)&glDrawElements_hook},
+    {"glBindBuffer",            (void*)&glBindBuffer_hook},
+    {"glBindVertexArray",       (void*)&glBindVertexArray_hook},
+    {"glGenBuffers",            (void*)&glGenBuffers_hook},
+    {"glDeleteBuffers",         (void*)&glDeleteBuffers_hook},
+    {"glBufferData",            (void*)&glBufferData_hook},
+    {"glBufferSubData",         (void*)&glBufferSubData_hook},
+    {"glUseProgram",            (void*)&glUseProgram_hook},
+    {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook},
+    {"glDrawElements",          (void*)&glDrawElements_hook},
+    {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook},
+    {"glDrawRangeElements",     (void*)&glDrawRangeElements_hook},
+    {"glBindVertexArrayOES",    (void*)&glBindVertexArray_hook},
 };
 
+void* lookup_entry(const char* name) {
+    for (const auto& e : kEntries) if (strcmp(e.name, name) == 0) return e.fn;
+    return nullptr;
+}
+
 void* eglGetProcAddress_hook(const char* name) {
-    if (name) {
-        for (const auto& e : kEntries) {
-            if (strcmp(e.name, name) == 0) return e.fn;
-        }
-    }
+    c_egl++;
+    void* f = lookup_entry(name);
+    if (f) { log_name("egl", name); return f; }
     return o_eglGetProcAddress ? o_eglGetProcAddress(name) : nullptr;
+}
+
+void* dlsym_hook(void* handle, const char* name) {
+    c_dlsym++;
+    void* f = lookup_entry(name);
+    if (f) { log_name("dlsym", name); return f; }
+    return o_dlsym ? o_dlsym(handle, name) : nullptr;
 }
 
 }  // namespace
 
 void gles_probe_start() {
     void* h = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
-    if (!h) h = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!h) { LOGE("dlopen libEGL.so failed: %s", dlerror()); return; }
-    void* p = dlsym(h, "eglGetProcAddress");
-    if (!p) { LOGE("no eglGetProcAddress"); return; }
-
-    int rc = DobbyHook(p, (void*)&eglGetProcAddress_hook, (void**)&o_eglGetProcAddress);
-    if (rc != 0 || !o_eglGetProcAddress) {
-        LOGE("DobbyHook eglGetProcAddress failed rc=%d", rc);
-        return;
+    if (h) {
+        void* p = dlsym(h, "eglGetProcAddress");
+        if (p) {
+            int rc = DobbyHook(p, (void*)&eglGetProcAddress_hook, (void**)&o_eglGetProcAddress);
+            if (rc == 0 && o_eglGetProcAddress) LOGI("hooked eglGetProcAddress @ %p", p);
+            else LOGE("DobbyHook eglGetProcAddress failed rc=%d", rc);
+        }
+    } else {
+        LOGE("dlopen libEGL.so failed: %s", dlerror());
     }
-    LOGI("hooked eglGetProcAddress @ %p (orig %p)", p, (void*)o_eglGetProcAddress);
+
+    void* dl = dlopen("libdl.so", RTLD_NOW | RTLD_LOCAL);
+    if (dl) {
+        void* p = dlsym(dl, "dlsym");
+        if (p) {
+            int rc = DobbyHook(p, (void*)&dlsym_hook, (void**)&o_dlsym);
+            if (rc == 0 && o_dlsym) LOGI("hooked dlsym @ %p", p);
+            else { LOGE("DobbyHook dlsym failed rc=%d", rc); o_dlsym = nullptr; }
+        }
+    }
 }
+
