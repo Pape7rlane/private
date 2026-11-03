@@ -387,6 +387,10 @@ void load_patches() {
             LOGI("patch vbscale3 hash=%08llx attr=%u f=(%.2f %.2f %.2f)",
                  (unsigned long long)pt.hash, pt.attrIdx, pt.factor, pt.fy, pt.fz);
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
+        } else if (!strcmp(cmd, "attrstat")) {
+            if (n < 2) continue;
+            pt.action = 11;
+            pt.hash = strtoull(a1, nullptr, 16);
         } else if (!strcmp(cmd, "vbmod")) {
             // vbmod <ibhash> <posfile> <blendfile> <texfile>
             if (n < 5) continue;
@@ -677,6 +681,47 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             }
             g_vbBinds.clear();
             { VbBind vb; vb.idx = (int)pt.attrIdx; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+            continue;
+        }
+        if (pt.action == 11) {
+            if (pt.done) continue;
+            pt.done = true;
+            LiveAttr la[16];
+            capture_vao(la);
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+            }
+            LOGI("ATTRSTAT hash=%08llx vao=%u verts=%u", (unsigned long long)wh1, g_curVao, vcount);
+            for (int i = 0; i < 16; i++) {
+                if (!la[i].enabled) continue;
+                GLuint savedArr = g_curArray;
+                o_glBindBuffer(GL_ARRAY_BUFFER, la[i].buf);
+                size_t want = (size_t)std::min<uint32_t>(vcount, 64) * (size_t)la[i].stride;
+                if (!want || want > (1u << 20)) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+                void* mp = o_glMapBufferRange
+                               ? o_glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)(uintptr_t)la[i].ptr,
+                                                    (GLsizeiptr)want, GL_MAP_READ_BIT)
+                               : nullptr;
+                if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+                const uint8_t* b = (const uint8_t*)mp;
+                std::string line;
+                char hb[8];
+                for (int v = 0; v < 4; v++) {
+                    snprintf(hb, sizeof hb, " [%d]", v);
+                    line += hb;
+                    for (GLsizei q = 0; q < la[i].stride && q < 24; q++) {
+                        snprintf(hb, sizeof hb, "%02x", b[v * (size_t)la[i].stride + (size_t)q]);
+                        line += hb;
+                    }
+                }
+                if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                LOGI("  a%d sz=%d ty=%x st=%d ptr=%p buf=%u |%s",
+                     i, la[i].size, la[i].type, la[i].stride, la[i].ptr, la[i].buf, line.c_str());
+            }
             continue;
         }
         if (pt.action == 10) {
