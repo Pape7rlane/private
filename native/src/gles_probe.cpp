@@ -58,7 +58,7 @@ std::unordered_map<GLuint, VaoState> g_vaos;
 
 GLuint g_curVao = 0, g_curArray = 0, g_curProg = 0;
 
-std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0},
+std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0}, c_basev{0},
                       c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0}, c_skipped{0},
                       c_overridden{0}, c_subData{0};
 
@@ -135,6 +135,8 @@ decltype(&glDeleteBuffers)   o_glDeleteBuffers   = nullptr;
 decltype(&glUseProgram)      o_glUseProgram      = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
+decltype(&glDrawElementsBaseVertex) o_glDrawElementsBaseVertex = nullptr;
+decltype(&glDrawElementsInstancedBaseVertex) o_glDrawElementsInstancedBaseVertex = nullptr;
 decltype(&glDrawElementsInstanced) o_glDrawElementsInstanced = nullptr;
 decltype(&glDrawRangeElements) o_glDrawRangeElements = nullptr;
 decltype(&glMapBufferRange)  o_glMapBufferRange  = nullptr;
@@ -522,7 +524,7 @@ void restore_vb() {
     g_vbAttr = -1;
 }
 
-int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
+int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basev = 0) {
     c_draw++;
     GLuint eb = cur_elem();
     const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
@@ -536,6 +538,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         size_t off = (size_t)(uintptr_t)indices;
         size_t bytes = (size_t)count * esz;
         first = (uint32_t)(off / esz);
+        if (basev) { c_basev++; if (c_basev <= 20) LOGI("BASEV %08x first=%u cnt=%u bv=%d", (unsigned)wh1, first, (unsigned)count, basev); }
         h1 = wh1; h1a = 0;
         (void)off; (void)bytes;
         exact = true;
@@ -752,10 +755,22 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             for (int i = 0; i < 16; i++) {
                 const Attr& a = vit->second.attr[i];
                 if (!a.has) continue;
-                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u ptr=%p\n",
-                        i, a.size, a.type, a.stride, a.buf, a.ptr);
-                LOGI("  a%d size=%d type=%x stride=%d buf=%u ptr=%p",
-                     i, a.size, a.type, a.stride, a.buf, a.ptr);
+                GLint bufsz = 0;
+                {
+                    typedef void (*PFNGETBUF)(GLenum, GLenum, GLint*);
+                    static PFNGETBUF pget = nullptr;
+                    if (!pget) pget = (PFNGETBUF)gl_real("glGetBufferParameteriv");
+                    if (pget) {
+                        GLuint savedB = g_curArray;
+                        o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+                        pget(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &bufsz);
+                        o_glBindBuffer(GL_ARRAY_BUFFER, savedB);
+                    }
+                }
+                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u ptr=%p bufsize=%d\n",
+                        i, a.size, a.type, a.stride, a.buf, a.ptr, bufsz);
+                LOGI("  a%d size=%d type=%x stride=%d buf=%u ptr=%p bufsize=%d",
+                     i, a.size, a.type, a.stride, a.buf, a.ptr, bufsz);
                 if (!a.buf || a.stride <= 0 || !vcount) continue;
                 size_t want = (size_t)vcount * (size_t)a.stride;
                 if (want > (8u << 20)) { fprintf(mf, "  skip big\n"); continue; }
@@ -910,6 +925,40 @@ void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei cou
     restore_vb();
 }
 
+void glDrawElementsBaseVertex_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+    RESOLVE(o_glDrawElementsBaseVertex, "glDrawElementsBaseVertex");
+    int act = on_draw("B", mode, count, type, indices, basevertex);
+    if (act == 1) return;
+    apply_vb();
+    if (act == 2 && o_glBindBuffer) {
+        GLuint saved = cur_elem();
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
+        o_glDrawElementsBaseVertex(mode, g_overrideCount, g_overrideType, 0, basevertex);
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        restore_vb();
+        return;
+    }
+    o_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+    restore_vb();
+}
+
+void glDrawElementsInstancedBaseVertex_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n, GLint basevertex) {
+    RESOLVE(o_glDrawElementsInstancedBaseVertex, "glDrawElementsInstancedBaseVertex");
+    int act = on_draw("IB", mode, count, type, indices, basevertex);
+    if (act == 1) return;
+    apply_vb();
+    if (act == 2 && o_glBindBuffer) {
+        GLuint saved = cur_elem();
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
+        o_glDrawElementsInstancedBaseVertex(mode, g_overrideCount, g_overrideType, 0, n, basevertex);
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        restore_vb();
+        return;
+    }
+    o_glDrawElementsInstancedBaseVertex(mode, count, type, indices, n, basevertex);
+    restore_vb();
+}
+
 // ---------------------------------------------------------------- 表
 
 struct Entry { const char* name; void* fn; void** tramp; };
@@ -926,6 +975,8 @@ const Entry kEntries[] = {
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
     {"glDrawRangeElements",     (void*)&glDrawRangeElements_hook,     (void**)&o_glDrawRangeElements},
+    {"glDrawElementsBaseVertex",          (void*)&glDrawElementsBaseVertex_hook,          (void**)&o_glDrawElementsBaseVertex},
+    {"glDrawElementsInstancedBaseVertex", (void*)&glDrawElementsInstancedBaseVertex_hook, (void**)&o_glDrawElementsInstancedBaseVertex},
     {"glMapBufferRange",        (void*)&glMapBufferRange_hook,        (void**)&o_glMapBufferRange},
     {"glUnmapBuffer",           (void*)&glUnmapBuffer_hook,           (void**)&o_glUnmapBuffer},
 };
