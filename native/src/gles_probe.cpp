@@ -255,7 +255,8 @@ struct MapState { void* ptr = nullptr; GLuint buf = 0; GLintptr off = 0; GLsizei
 MapState g_mapArr, g_mapElem;
 
 void* glMapBufferRange_hook(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
-    RESOLVE(o_glMapBufferRange, "glMapBufferRange");
+    if (!o_glMapBufferRange) o_glMapBufferRange = (decltype(&glMapBufferRange))gl_real("glMapBufferRange");
+    if (!o_glMapBufferRange) return nullptr;
     void* p = o_glMapBufferRange(target, offset, length, access);
     if (p) {
         MapState& m = (target == GL_ELEMENT_ARRAY_BUFFER) ? g_mapElem : g_mapArr;
