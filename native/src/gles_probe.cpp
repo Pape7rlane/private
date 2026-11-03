@@ -390,6 +390,17 @@ void load_patches() {
             LOGI("patch vbscale3 hash=%08llx attr=%u f=(%.2f %.2f %.2f)",
                  (unsigned long long)pt.hash, pt.attrIdx, pt.factor, pt.fy, pt.fz);
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
+        } else if (!strcmp(cmd, "vbposp")) {
+            // vbposp <ibhash> <attr> <file> <srcStride> <perm>
+            if (n < 6) continue;
+            pt.action = 8;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.attrIdx = (uint32_t)strtoul(a2, nullptr, 0);
+            pt.file = a3;
+            pt.srcStride = (uint32_t)strtoul(a4, nullptr, 0);
+            pt.perm = (int)strtoul(a5, nullptr, 0);
+            LOGI("patch vbposp hash=%08llx attr=%u stride=%u perm=%d",
+                 (unsigned long long)pt.hash, pt.attrIdx, pt.srcStride, pt.perm);
         } else if (!strcmp(cmd, "attrstat")) {
             if (n < 2) continue;
             pt.action = 11;
@@ -969,10 +980,17 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 size_t srcN = pt.ib.size() / pt.srcStride;
                 size_t n = std::min((size_t)vcount, srcN);
                 for (size_t i = 0; i < n; i++) {
-                    const uint8_t* sp = pt.ib.data() + i * pt.srcStride + pt.srcOffset;
-                    uint8_t* dp = buf.data() + i * (size_t)a.stride + dstOff;
+                    const float* sp = (const float*)(pt.ib.data() + i * pt.srcStride + pt.srcOffset);
+                    float* dp = (float*)(buf.data() + i * (size_t)a.stride + dstOff);
                     if ((size_t)a.stride < dstOff + copy) continue;
-                    memcpy(dp, sp, copy);
+                    switch (pt.perm) {
+                        case 1: dp[0]=sp[1]; dp[1]=sp[0]; dp[2]=sp[2]; break;
+                        case 2: dp[0]=sp[1]; dp[1]=sp[2]; dp[2]=sp[0]; break;
+                        case 3: dp[0]=sp[2]; dp[1]=sp[1]; dp[2]=sp[0]; break;
+                        case 4: dp[0]=sp[2]; dp[1]=sp[0]; dp[2]=sp[1]; break;
+                        case 5: dp[0]=sp[0]; dp[1]=sp[2]; dp[2]=sp[1]; break;
+                        default: dp[0]=sp[0]; dp[1]=sp[1]; dp[2]=sp[2]; break;
+                    }
                 }
                 GLuint nb = 0;
                 o_glGenBuffers(1, &nb);
