@@ -40,14 +40,10 @@ void* probe_thread(void*) {
 
         LI("libil2cpp.so found: %s bias=0x%llx", g_path, (unsigned long long)g_bias);
 
-        void* h = dlopen(g_path, RTLD_NOW);
-        if (!h) h = dlopen(g_path, RTLD_NOLOAD);
-        LI("dlopen -> %p (err=%s)", h, dlerror());
-        if (!h) return nullptr;
-
-        auto get_table = (GetApiTableFn)dlsym(h, "il2cpp_get_api_table");
-        LI("il2cpp_get_api_table=%p", (void*)get_table);
-        if (!get_table) { LE("no il2cpp_get_api_table"); return nullptr; }
+        // dlopen 被 namespace 挡住, 直接用 bias + RVA (readelf 得到的 il2cpp_get_api_table)
+        auto get_table = (GetApiTableFn)(g_bias + 0x6dcdc4cULL);
+        LI("il2cpp_get_api_table @ %p  insn=0x%08x", (void*)get_table,
+           *(uint32_t*)get_table);
 
         void** table = (void**)get_table();
         if (!table) { LE("api table null"); return nullptr; }
