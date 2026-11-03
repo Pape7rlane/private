@@ -653,6 +653,7 @@ void install_hooks() {
 // ---------------------------------------------------------------- 入口
 
 void gles_probe_start(const char* out_dir);
+void il2cpp_probe_start();
 
 __attribute__((constructor)) static void probe_on_load() {
     init_pkg();
@@ -666,6 +667,7 @@ __attribute__((constructor)) static void probe_on_load() {
     }
     install_hooks();
     gles_probe_start(g_out.c_str());
+    il2cpp_probe_start();
     LOGI("hsrprobe ready");
 }
 
