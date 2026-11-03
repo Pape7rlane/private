@@ -137,7 +137,7 @@ public:
 };
 
 inline static Logger gLogger;
-Logger *Logger::Shared() {
+inline Logger *Logger::Shared() {
   return &gLogger;
 }
 
