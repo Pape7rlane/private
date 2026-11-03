@@ -407,7 +407,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
     }
 
-    bool skip = false;
+    bool skip = false, over = false;
     load_patches();
     for (auto& pt : g_patches) {
         if (pt.action == 3) { c_skipped++; skip = true; continue; }
@@ -436,6 +436,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 g_overrideBuf = pt.glBuf;
                 g_overrideCount = (GLsizei)(pt.drawCount ? pt.drawCount : pt.ibCount);
                 g_overrideType = pt.ibType;
+                over = true;
                 c_overridden++;
             }
             continue;
@@ -480,7 +481,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
     Key k{wh1, first, (uint32_t)count};
     auto it2 = g_recs.find(k);
     if (it2 == g_recs.end()) {
-        if (g_recs.size() >= 60000) return skip ? 1 : 0;
+        if (g_recs.size() >= 60000) { if (skip) return 1; return over ? 2 : 0; }
         Rec r;
         r.vao = g_curVao; r.eb = eb; r.prog = g_curProg;
         r.type = type; r.mode = mode;
@@ -510,7 +511,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             LOGI("skipped=%llu overridden=%llu", (unsigned long long)c_skipped.load(),
                  (unsigned long long)c_overridden.load());
     }
-    return skip ? 1 : 0;
+    if (skip) return 1;
+    return over ? 2 : 0;
 }
 
 void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* indices) {
