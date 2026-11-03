@@ -4,5 +4,6 @@
         <item>com.miHoYo.hkrpg</item>
         <item>com.miHoYo.hkrpg.bilibili</item>
         <item>com.HoYoverse.hkrpgoversea</item>
+        <item>com.HoYoverse.hkrpgoverseacbtest</item>
     </string-array>
 </resources>

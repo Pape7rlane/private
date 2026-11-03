@@ -9,7 +9,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 class ProbeEntry : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName !in TARGETS) return
+        if (PREFIXES.none { lpparam.packageName.startsWith(it) }) return
         XposedBridge.log("[hsrprobe] target: " + lpparam.packageName)
 
         try {
@@ -36,10 +36,10 @@ class ProbeEntry : IXposedHookLoadPackage {
     }
 
     companion object {
-        private val TARGETS = setOf(
+        // 前缀匹配, 正式服 / B服 / 国际服 / CBT 测试服 全都覆盖
+        private val PREFIXES = listOf(
             "com.miHoYo.hkrpg",
-            "com.miHoYo.hkrpg.bilibili",
-            "com.HoYoverse.hkrpgoversea"
+            "com.HoYoverse.hkrpg"
         )
     }
 }
