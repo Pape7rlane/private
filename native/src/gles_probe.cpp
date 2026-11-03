@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <cerrno>
 #include <atomic>
 #include <cstdint>
@@ -322,11 +323,17 @@ struct Patch {
 std::vector<Patch> g_patches;
 bool g_patchesLoaded = false;
 
+time_t g_patchMtime = 0;
+
 void load_patches() {
-    if (g_patchesLoaded) return;
-    g_patchesLoaded = true;
     if (!g_dir[0]) return;
     std::string p = std::string(g_dir) + "/patch.txt";
+    struct stat st;
+    time_t mt = (stat(p.c_str(), &st) == 0) ? st.st_mtime : 0;
+    if (g_patchesLoaded && mt == g_patchMtime) return;
+    g_patchMtime = mt;
+    g_patchesLoaded = true;
+    g_patches.clear();
     FILE* f = fopen(p.c_str(), "r");
     if (!f) { LOGI("no patch.txt"); return; }
     char line[512];
@@ -369,6 +376,12 @@ void load_patches() {
             pt.factor = (float)atof(a3);
             if (n >= 5) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a4, nullptr, 0); }
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
+        } else if (!strcmp(cmd, "vbbox")) {
+            // vbbox <ibhash> [first]  — 打印该 draw 的 attr0 包围盒
+            if (n < 2) continue;
+            pt.action = 9;
+            pt.hash = strtoull(a1, nullptr, 16);
+            if (n >= 3) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a2, nullptr, 0); }
         } else if (!strcmp(cmd, "vbpos")) {
             // vbpos <ibhash> <attr> <file> <srcStride> [srcOffset] [first]
             if (n < 5) continue;
@@ -392,6 +405,47 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
         } else { LOGW("unknown patch cmd %s", cmd); continue; }
+        if (pt.action == 9) {
+            if (pt.done) continue;
+            pt.done = true;
+            auto vit = g_vaos.find(g_curVao);
+            if (vit == g_vaos.end()) { LOGI("vbbox: no vao"); continue; }
+            const Attr& a = vit->second.attr[0];
+            if (!a.has || !a.buf || a.stride <= 0) { LOGI("vbbox: attr0 missing"); continue; }
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+            }
+            if (!vcount) { LOGI("vbbox: no ib data"); continue; }
+            size_t want = (size_t)vcount * (size_t)a.stride;
+            if (want > (16u << 20)) { LOGI("vbbox: too big %zu", want); continue; }
+            GLuint savedArr = g_curArray;
+            o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+            void* mp = o_glMapBufferRange
+                           ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT)
+                           : nullptr;
+            if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); LOGI("vbbox: map failed"); continue; }
+            std::vector<uint8_t> buf((const uint8_t*)mp, (const uint8_t*)mp + want);
+            if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+            o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+            float mn[4] = {1e30f,1e30f,1e30f,1e30f}, mx[4] = {-1e30f,-1e30f,-1e30f,-1e30f};
+            size_t off = (size_t)(uintptr_t)a.ptr, vs = (size_t)a.stride;
+            int nc = a.size > 4 ? 4 : (int)a.size;
+            for (size_t k = 0; k + off + 4 * (size_t)nc <= buf.size(); k += vs) {
+                const float* f = (const float*)(buf.data() + k + off);
+                for (int c = 0; c < nc; c++) {
+                    if (!(f[c] == f[c])) continue;
+                    if (f[c] < mn[c]) mn[c] = f[c];
+                    if (f[c] > mx[c]) mx[c] = f[c];
+                }
+            }
+            LOGI("BBOX %08llx first=%u cnt=%u vao=%u buf=%u n=%u stride=%d ptr=%p :: (%.3f %.3f %.3f %.3f) -> (%.3f %.3f %.3f %.3f)",
+                 (unsigned long long)pt.hash, first, count, g_curVao, a.buf, vcount, a.stride, a.ptr,
+                 mn[0], mn[1], mn[2], mn[3], mx[0], mx[1], mx[2], mx[3]);
+            continue;
+        }
         if (pt.action == 8) {
             std::string fp = std::string(g_dir) + "/" + pt.file;
             FILE* vf = fopen(fp.c_str(), "rb");
