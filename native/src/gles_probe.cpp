@@ -514,12 +514,19 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         } else if (pt.action == 6) {
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end()) continue;
+            // 顶点数 = 索引最大值 + 1
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+            }
             std::string base = std::string(g_dir) + "/" + pt.file;
             std::string meta = base + ".txt";
             FILE* mf = fopen(meta.c_str(), "w");
             if (!mf) continue;
-            fprintf(mf, "ib_hash=%08llx first=%u count=%u type=%x vao=%u\n",
-                    (unsigned long long)wh1, first, (unsigned)count, type, g_curVao);
+            fprintf(mf, "ib_hash=%08llx first=%u count=%u type=%x vao=%u verts=%u\n",
+                    (unsigned long long)wh1, first, (unsigned)count, type, g_curVao, vcount);
             for (int i = 0; i < 16; i++) {
                 const Attr& a = vit->second.attr[i];
                 if (!a.has) continue;
@@ -528,18 +535,30 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 size_t decl = (bit == g_bufs.end()) ? 0 : (size_t)bit->second.size;
                 fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u bytes=%zu declared=%zu\n",
                         i, a.size, a.type, a.stride, a.buf, bsz, decl);
-                if (bit == g_bufs.end() || bit->second.data.empty()) continue;
-                char fn[256];
-                snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
-                FILE* bf = fopen(fn, "wb");
-                if (bf) {
-                    fwrite(bit->second.data.data(), 1, bit->second.data.size(), bf);
-                    fclose(bf);
+                if (!a.buf || a.stride <= 0) continue;
+
+                // 直接从 GPU 映射读回
+                size_t want = (size_t)vcount * (size_t)a.stride;
+                if (!want || want > (8u << 20)) continue;
+                GLuint savedArr = g_curArray;
+                GLenum savedElem = 0; (void)savedElem;
+                o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+                void* mp = o_glMapBufferRange ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want,
+                                                                   GL_MAP_READ_BIT) : nullptr;
+                if (mp) {
+                    char fn[256];
+                    snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
+                    FILE* bf = fopen(fn, "wb");
+                    if (bf) { fwrite(mp, 1, want, bf); fclose(bf); }
+                    if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                    fprintf(mf, "  mapped=1 wrote=%zu\n", want);
+                } else {
+                    fprintf(mf, "  mapped=0\n");
                 }
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
             }
             fclose(mf);
-            LOGI("dumped mesh %s", base.c_str());
-            pt.done = true;
+            LOGI("dumped mesh %s verts=%u", base.c_str(), vcount);
         } else if (pt.action == 2) {
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end() || !vit->second.attr[0].has) continue;
