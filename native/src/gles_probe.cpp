@@ -35,7 +35,18 @@ char g_dir[512] = {0};
 
 struct Attr { bool has=false; GLint size=0; GLenum type=0; GLsizei stride=0; GLuint buf=0; };
 struct VaoState { GLuint elem = 0; Attr attr[16]; };
-struct BufInfo { GLsizeiptr size=0; uint64_t h1=0; uint64_t h1a=0; GLenum target=0; };
+struct BufInfo {
+    GLsizeiptr size = 0;
+    uint64_t   h1   = 0;   // 整段 FNV-1
+    uint64_t   h1a  = 0;   // 整段 FNV-1a
+    GLenum     target = 0;
+    std::vector<uint8_t> data;   // 索引缓冲副本, 用于按 draw 子段哈希
+};
+
+// 索引缓冲副本预算
+size_t g_dataBytes = 0;
+const size_t kDataBudget = 96u << 20;
+const size_t kDataPerBuf = 4u << 20;
 
 std::unordered_map<GLuint, BufInfo>  g_bufs;
 std::unordered_map<GLuint, VaoState> g_vaos;
@@ -118,14 +129,22 @@ void* gl_real(const char* name) {
     } while (0)
 
 void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
-    if (!id) return;
+    if (!id || !data || size <= 0) return;
     BufInfo& b = g_bufs[id];
     b.size = size; b.target = target;
-    if (data && size > 0 && size <= (64 << 20)) {
-        const uint8_t* p = (const uint8_t*)data;
-        b.h1  = fnv1_32(p, (size_t)size);
-        b.h1a = fnv1a_32(p, (size_t)size);
+    const uint8_t* p = (const uint8_t*)data;
+    b.h1  = fnv1_32(p, (size_t)size);
+    b.h1a = fnv1a_32(p, (size_t)size);
+
+    // 只有索引缓冲需要保留副本 (draw 时按子段哈希)
+    if (target != GL_ELEMENT_ARRAY_BUFFER) return;
+    if ((size_t)size > kDataPerBuf || g_dataBytes + (size_t)size > kDataBudget) {
+        b.data.clear();
+        return;
     }
+    g_dataBytes -= b.data.size();
+    b.data.assign(p, p + (size_t)size);
+    g_dataBytes += b.data.size();
 }
 
 // ---------------------------------------------------------------- hooks
@@ -207,34 +226,53 @@ std::string layout_of(GLuint vao) {
 void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
     GLuint eb = cur_elem();
-    uint64_t h1 = 0, h1a = 0; GLsizeiptr bsz = 0;
-    auto it = g_bufs.find(eb);
-    if (it != g_bufs.end()) { h1 = it->second.h1; h1a = it->second.h1a; bsz = it->second.size; }
+    const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
+    uint64_t h1 = 0, h1a = 0, wh1 = 0, wh1a = 0;
+    uint32_t first = 0;
+    GLsizeiptr bsz = 0;
+    bool exact = false;
 
-    if (!eb && indices && count > 0) {
-        size_t bytes = (size_t)count * (type == GL_UNSIGNED_INT ? 4 : 2);
+    auto it = g_bufs.find(eb);
+    if (eb && it != g_bufs.end()) {
+        bsz = it->second.size;
+        wh1 = it->second.h1; wh1a = it->second.h1a;
+        size_t off = (size_t)(uintptr_t)indices;
+        size_t bytes = (size_t)count * esz;
+        first = (uint32_t)(off / esz);
+        if (!it->second.data.empty() && off + bytes <= it->second.data.size()) {
+            h1  = fnv1_32(it->second.data.data() + off, bytes);
+            h1a = fnv1a_32(it->second.data.data() + off, bytes);
+            exact = true;
+        } else {
+            h1 = wh1; h1a = wh1a;
+        }
+    } else if (!eb && indices && count > 0) {
+        size_t bytes = (size_t)count * esz;
         if (bytes <= (16 << 20)) {
             h1  = fnv1_32((const uint8_t*)indices, bytes);
             h1a = fnv1a_32((const uint8_t*)indices, bytes);
-            bsz = (GLsizeiptr)bytes;
+            wh1 = h1; wh1a = h1a;
+            exact = true;
         }
     }
 
-    uint64_t key = (h1 << 20) ^ ((uint64_t)count << 4) ^ (uint64_t)type ^ ((uint64_t)mode << 40);
-    if (!g_seen.insert(key).second || g_unique >= 8000) return;
+    uint64_t key = (h1 << 24) ^ ((uint64_t)first << 8) ^ ((uint64_t)count << 40) ^ (uint64_t)type;
+    if (!g_seen.insert(key).second || g_unique >= 20000) return;
     g_unique++;
 
     std::string lay = layout_of(g_curVao);
     if (open_out()) {
-        fprintf(g_fp, "%u\t%u\t%08llx\t%08llx\t%d\t%x\t%x\t%u\t%s\t%s\n",
+        fprintf(g_fp, "%u\t%u\t%08llx\t%08llx\t%08llx\t%08llx\t%u\t%d\t%x\t%x\t%u\t%s\t%s\t%d\n",
                 g_curVao, eb, (unsigned long long)h1, (unsigned long long)h1a,
-                (int)count, type, mode, g_curProg, kind, lay.c_str());
+                (unsigned long long)wh1, (unsigned long long)wh1a,
+                first, (int)count, type, mode, g_curProg, kind, lay.c_str(), exact ? 1 : 0);
         fflush(g_fp);
     }
     if (g_unique <= 300) {
-        LOGI("DRAW%s vao=%u eb=%u sz=%lld h1=%08llx h1a=%08llx cnt=%d type=%x mode=%x prog=%u %s",
-             kind, g_curVao, eb, (long long)bsz, (unsigned long long)h1,
-             (unsigned long long)h1a, (int)count, type, mode, g_curProg, lay.c_str());
+        LOGI("DRAW%s eb=%u sz=%lld h1=%08llx h1a=%08llx whole=%08llx first=%u cnt=%d type=%x prog=%u%s",
+             kind, eb, (long long)bsz, (unsigned long long)h1, (unsigned long long)h1a,
+             (unsigned long long)wh1, first, (int)count, type, g_curProg,
+             exact ? "" : " (whole)");
     }
     if (g_unique % 100 == 0) {
         LOGI("STAT u=%llu draws=%llu egl=%llu dlsym=%llu bindBuf=%llu vao=%llu genBuf=%llu bufData=%llu useProg=%llu attrib=%llu",
