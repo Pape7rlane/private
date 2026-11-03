@@ -57,7 +57,8 @@ std::unordered_map<GLuint, VaoState> g_vaos;
 GLuint g_curVao = 0, g_curArray = 0, g_curProg = 0;
 
 std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0},
-                      c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0}, c_skipped{0};
+                      c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0}, c_skipped{0},
+                      c_overridden{0};
 
 uint64_t g_unique = 0;
 std::unordered_set<uint64_t> g_seen;
@@ -234,6 +235,10 @@ struct Patch {
     uint32_t    first = 0, cnt = 0;
     std::string file;
     bool        done = false;
+    // ib 替换
+    std::vector<uint8_t> ib;
+    GLuint      glBuf = 0;
+    uint32_t    ibCount = 0;
 };
 
 std::vector<Patch> g_patches;
@@ -268,13 +273,33 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             if (n >= 3) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a2, nullptr, 0); }
             if (n >= 4) { pt.hasCnt = true;   pt.cnt   = (uint32_t)strtoul(a3, nullptr, 0); }
+        } else if (!strcmp(cmd, "ib")) {
+            if (n < 3) continue;
+            pt.action = 5;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+            if (n >= 4) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a3, nullptr, 0); }
         } else if (!strcmp(cmd, "dump") || !strcmp(cmd, "dumpvb")) {
             if (n < 3) continue;
             pt.action = (cmd[4] == 'v') ? 2 : 1;
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
         } else { LOGW("unknown patch cmd %s", cmd); continue; }
-        g_patches.push_back(pt);
+        if (pt.action == 5) {
+            std::string fp = std::string(g_dir) + "/" + pt.file;
+            FILE* ibf = fopen(fp.c_str(), "rb");
+            if (!ibf) { LOGE("cannot open ib %s", fp.c_str()); continue; }
+            fseek(ibf, 0, SEEK_END);
+            long sz = ftell(ibf);
+            fseek(ibf, 0, SEEK_SET);
+            if (sz <= 0 || sz > (64 << 20)) { fclose(ibf); LOGE("bad ib size %ld", sz); continue; }
+            pt.ib.resize((size_t)sz);
+            if (fread(pt.ib.data(), 1, (size_t)sz, ibf) != (size_t)sz) { fclose(ibf); continue; }
+            fclose(ibf);
+            pt.ibCount = (uint32_t)(sz / 2);
+            LOGI("patch ib: %s %zu bytes (%u idx)", pt.file.c_str(), pt.ib.size(), pt.ibCount);
+        }
+        g_patches.push_back(std::move(pt));
         LOGI("patch: %s", cmd);
     }
     fclose(f);
@@ -326,7 +351,11 @@ void dump_stats() {
     fflush(g_fp);
 }
 
-bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
+// 返回: 0=正常下发, 1=跳过, 2=用 g_overrideBuf 替换索引缓冲
+GLuint g_overrideBuf = 0;
+GLsizei g_overrideCount = 0;
+
+int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
     GLuint eb = cur_elem();
     const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
@@ -369,6 +398,26 @@ bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
         if (pt.hasFirst && first != pt.first) continue;
         if (pt.hasCnt && (uint32_t)count != pt.cnt) continue;
         if (pt.action == 0) { c_skipped++; skip = true; continue; }
+        if (pt.action == 5) {
+            if (!pt.glBuf && !pt.ib.empty() && o_glGenBuffers && o_glBindBuffer && o_glBufferData) {
+                GLuint nb = 0;
+                o_glGenBuffers(1, &nb);
+                GLuint saved = cur_elem();
+                o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, nb);
+                o_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)pt.ib.size(), pt.ib.data(),
+                               GL_STATIC_DRAW);
+                o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+                pt.glBuf = nb;
+                LOGI("ib buffer %u created for %08llx (%u idx)", nb,
+                     (unsigned long long)pt.hash, pt.ibCount);
+            }
+            if (pt.glBuf) {
+                g_overrideBuf = pt.glBuf;
+                g_overrideCount = pt.ibCount < (uint32_t)count ? pt.ibCount : (uint32_t)count;
+                c_overridden++;
+            }
+            continue;
+        }
         if (pt.done) continue;
 
         std::string path = std::string(g_dir) + "/" + pt.file;
@@ -409,7 +458,7 @@ bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
     Key k{wh1, first, (uint32_t)count};
     auto it2 = g_recs.find(k);
     if (it2 == g_recs.end()) {
-        if (g_recs.size() >= 60000) return false;
+        if (g_recs.size() >= 60000) return skip ? 1 : 0;
         Rec r;
         r.vao = g_curVao; r.eb = eb; r.prog = g_curProg;
         r.type = type; r.mode = mode;
@@ -435,22 +484,51 @@ bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
              (unsigned long long)c_bindBuf.load(), (unsigned long long)c_vao.load(),
              (unsigned long long)c_genBuf.load(), (unsigned long long)c_bufData.load(),
              (unsigned long long)c_useProg.load(), (unsigned long long)c_attrib.load());
-        if (c_skipped) LOGI("skipped=%llu", (unsigned long long)c_skipped.load());
+        if (c_skipped || c_overridden)
+            LOGI("skipped=%llu overridden=%llu", (unsigned long long)c_skipped.load(),
+                 (unsigned long long)c_overridden.load());
     }
-    return skip;
+    return skip ? 1 : 0;
 }
 
 void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawElements, "glDrawElements");
-    if (!on_draw("", mode, count, type, indices)) o_glDrawElements(mode, count, type, indices);
+    int act = on_draw("", mode, count, type, indices);
+    if (act == 1) return;
+    if (act == 2 && o_glBindBuffer) {
+        GLuint saved = cur_elem();
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
+        o_glDrawElements(mode, g_overrideCount, type, 0);
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        return;
+    }
+    o_glDrawElements(mode, count, type, indices);
 }
 void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n) {
     RESOLVE(o_glDrawElementsInstanced, "glDrawElementsInstanced");
-    if (!on_draw("I", mode, count, type, indices)) o_glDrawElementsInstanced(mode, count, type, indices, n);
+    int act = on_draw("I", mode, count, type, indices);
+    if (act == 1) return;
+    if (act == 2 && o_glBindBuffer) {
+        GLuint saved = cur_elem();
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
+        o_glDrawElementsInstanced(mode, g_overrideCount, type, 0, n);
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        return;
+    }
+    o_glDrawElementsInstanced(mode, count, type, indices, n);
 }
 void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawRangeElements, "glDrawRangeElements");
-    if (!on_draw("R", mode, count, type, indices)) o_glDrawRangeElements(mode, start, end, count, type, indices);
+    int act = on_draw("R", mode, count, type, indices);
+    if (act == 1) return;
+    if (act == 2 && o_glBindBuffer) {
+        GLuint saved = cur_elem();
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
+        o_glDrawRangeElements(mode, 0, g_overrideCount, g_overrideCount, type, 0);
+        o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        return;
+    }
+    o_glDrawRangeElements(mode, start, end, count, type, indices);
 }
 
 // ---------------------------------------------------------------- 表
