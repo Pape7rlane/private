@@ -58,11 +58,10 @@ object NativeLoader {
         System.load(out.absolutePath)
     }
 
-    // LSPosed 自己的类被 R8 混淆了, modulePath 字段名不存在, 只能从
-    // 类加载器的 dexElements 里翻, 再用 zip 里有没有我们的 so 来确认是哪个 APK
     private fun findModuleApk(lpparam: XC_LoadPackage.LoadPackageParam, entryName: String): String? {
         val cands = LinkedHashSet<String>()
 
+        // 1) LSPosed 的 modulePath (可能被混淆, 一般拿不到)
         for (name in arrayOf("modulePath", "getModulePath")) {
             try {
                 val c = lpparam.javaClass
@@ -78,6 +77,7 @@ object NativeLoader {
             }
         }
 
+        // 2) 自己的 codeSource
         try {
             val loc = NativeLoader::class.java.protectionDomain?.codeSource?.location
             if (loc != null && loc.protocol == "file") {
@@ -87,7 +87,11 @@ object NativeLoader {
         } catch (_: Throwable) {
         }
 
+        // 3) 类加载器 dexElements (Android 14+ 是 hidden API, 大概率被拦)
         cands.addAll(apkPathsFromClassLoader())
+
+        // 4) /proc/self/maps: APK 被 mmap 过就一定在里面, 不依赖任何 hidden API
+        cands.addAll(apkPathsFromMaps())
 
         Log.i(TAG, "apk candidates: " + cands.joinToString(" | "))
 
@@ -95,6 +99,22 @@ object NativeLoader {
             if (hasEntry(p, entryName)) return p
         }
         return null
+    }
+
+    private fun apkPathsFromMaps(): List<String> {
+        val out = ArrayList<String>()
+        try {
+            File("/proc/self/maps").forEachLine { line ->
+                val idx = line.indexOf('/')
+                if (idx >= 0) {
+                    var p = line.substring(idx).trim()
+                    if (p.endsWith(" (deleted)")) p = p.removeSuffix(" (deleted)")
+                    if (p.endsWith(".apk") && !out.contains(p)) out.add(p)
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return out
     }
 
     private fun apkPathsFromClassLoader(): List<String> {
