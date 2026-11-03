@@ -684,10 +684,19 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             continue;
         }
         if (pt.action == 11) {
-            if (pt.done) continue;
-            pt.done = true;
             LiveAttr la[16];
             capture_vao(la);
+            std::string sig;
+            char sb[64];
+            for (int i = 0; i < 16; i++) {
+                if (!la[i].enabled) continue;
+                snprintf(sb, sizeof sb, "%d:%d/%x/%d/%d,", i, la[i].size, la[i].type, la[i].stride, (int)(uintptr_t)la[i].ptr);
+                sig += sb;
+            }
+            if (sig.empty() || sig == pt.file) continue;
+            if (pt.binds.size() >= 10) continue;
+            pt.file = sig;
+            pt.binds.push_back({(int)pt.binds.size(), 0});
             uint32_t vcount = 0;
             if (it != g_bufs.end() && !it->second.data.empty()) {
                 const uint16_t* ip = (const uint16_t*)it->second.data.data();
