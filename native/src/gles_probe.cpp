@@ -49,8 +49,8 @@ struct BufInfo {
 // 索引缓冲副本预算
 size_t g_dataBytes = 0;
 // 只缓存小缓冲: 角色网格一定在里面, 环境大缓冲直接跳过
-const size_t kDataBudget  = 256u << 20;
-const size_t kDataPerBuf  = 1u << 20;
+const size_t kDataBudget  = 384u << 20;
+const size_t kDataPerBuf  = 4u << 20;
 
 std::unordered_map<GLuint, BufInfo>  g_bufs;
 std::unordered_map<GLuint, VaoState> g_vaos;
@@ -59,7 +59,7 @@ GLuint g_curVao = 0, g_curArray = 0, g_curProg = 0;
 
 std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0},
                       c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0}, c_skipped{0},
-                      c_overridden{0};
+                      c_overridden{0}, c_subData{0};
 
 uint64_t g_unique = 0;
 std::unordered_set<uint64_t> g_seen;
@@ -151,9 +151,10 @@ void* gl_real(const char* name) {
     } while (0)
 
 void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
-    if (!id || !data || size <= 0) return;
+    if (!id || size <= 0) return;
     BufInfo& b = g_bufs[id];
-    b.size = size; b.target = target;
+    b.size = size; b.target = target;   // 声明大小, 无论是否缓存数据
+    if (!data) return;
     const uint8_t* p = (const uint8_t*)data;
     b.h_ib = buffer_hash(p, (size_t)size, 2u);
     b.h_vb = buffer_hash(p, (size_t)size, 1u);
@@ -209,7 +210,13 @@ void glBufferData_hook(GLenum target, GLsizeiptr size, const void* data, GLenum 
 
 void glBufferSubData_hook(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
     RESOLVE(o_glBufferSubData, "glBufferSubData");
-    if (data && size > 0 && target == GL_ELEMENT_ARRAY_BUFFER) record_index(cur_elem(), size, data, target);
+    c_subData++;
+    if (target == GL_ELEMENT_ARRAY_BUFFER) {
+        if (data && size > 0) record_index(cur_elem(), size, data, target);
+    } else if (g_curArray && size > 0) {
+        auto& b = g_bufs[g_curArray];
+        if (b.size < offset + size) b.size = offset + size;
+    }
     o_glBufferSubData(target, offset, size, data);
 }
 
@@ -474,8 +481,9 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 if (!a.has) continue;
                 auto bit = g_bufs.find(a.buf);
                 size_t bsz = (bit == g_bufs.end()) ? 0 : bit->second.data.size();
-                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u bytes=%zu\n",
-                        i, a.size, a.type, a.stride, a.buf, bsz);
+                size_t decl = (bit == g_bufs.end()) ? 0 : (size_t)bit->second.size;
+                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u bytes=%zu declared=%zu\n",
+                        i, a.size, a.type, a.stride, a.buf, bsz, decl);
                 if (bit == g_bufs.end() || bit->second.data.empty()) continue;
                 char fn[256];
                 snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
@@ -542,6 +550,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
              (unsigned long long)c_bindBuf.load(), (unsigned long long)c_vao.load(),
              (unsigned long long)c_genBuf.load(), (unsigned long long)c_bufData.load(),
              (unsigned long long)c_useProg.load(), (unsigned long long)c_attrib.load());
+        LOGI("subData=%llu", (unsigned long long)c_subData.load());
         if (c_skipped || c_overridden)
             LOGI("skipped=%llu overridden=%llu", (unsigned long long)c_skipped.load(),
                  (unsigned long long)c_overridden.load());
