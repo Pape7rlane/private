@@ -317,13 +317,13 @@ public:
   TurboAssembler(void *address, CodeBuffer *buffer) : Assembler(address, buffer) {
   }
 
-  void Ldr(Register rt, PseudoLabel *label) {
+  void Ldr(Register rt, AssemblerPseudoLabel *label) {
     if (label->pos()) {
-      int offset = label->pos() - buffer_->buffer_size();
+      int offset = label->pos() - buffer_->GetBufferSize();
       ldr(rt, MemOperand(pc, offset));
     } else {
       // record this ldr, and fix later.
-      label->link_to(kLdrLiteral, buffer_->buffer_size());
+      label->link_to(kLdrLiteral, buffer_->GetBufferSize());
       ldr(rt, MemOperand(pc, 0));
     }
   }
@@ -333,13 +333,13 @@ public:
     bl(0);
     b(4);
     ldr(pc, MemOperand(pc, -4));
-    buffer_->Emit<int32_t>((uint32_t)(uintptr_t)function.address());
+    buffer_->Emit32((uint32_t)(uintptr_t)function.address());
   }
 
   void Move32Immeidate(Register rd, const Operand &x, Condition cond = AL) {
   }
 
-  void RelocLabelFixup(stl::unordered_map<off_t, off_t> *relocated_offset_map) {
+  void RelocLabelFixup(tinystl::unordered_map<off_t, off_t> *relocated_offset_map) {
     for (auto *data_label : data_labels_) {
       auto val = data_label->data<int32_t>();
       auto iter = relocated_offset_map->find(val);
