@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <chrono>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -740,9 +741,12 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         if (pt.action == 10) {
             if (pt.done) {
                 if (pt.perm < 0) {
-                    // 轮换模式: 每 120 次命中换一种轴置换
-                    if (++pt.hits >= 120) {
-                        pt.hits = 0;
+                    // 轮换模式: 每 2 秒换一种轴置换（按真实时间，不受帧率影响）
+                    static std::chrono::steady_clock::time_point last;
+                    auto now = std::chrono::steady_clock::now();
+                    if (last.time_since_epoch().count() == 0) last = now;
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() >= 2000) {
+                        last = now;
                         pt.perm = (pt.perm + 1) % 6;
                         pt.done = false;
                         LOGI("vbmod CYCLE perm=%d", pt.perm);
