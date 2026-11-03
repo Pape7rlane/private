@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <algorithm>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <GLES3/gl3.h>
@@ -223,18 +225,61 @@ std::string layout_of(GLuint vao) {
     return s;
 }
 
+// 一次 draw 的指纹: 整个 IB 的 hash + match_first_index + 索引数
+struct Key {
+    uint64_t wh1;
+    uint32_t first;
+    uint32_t cnt;
+    bool operator<(const Key& o) const {
+        if (wh1 != o.wh1) return wh1 < o.wh1;
+        if (first != o.first) return first < o.first;
+        return cnt < o.cnt;
+    }
+};
+
+struct Rec {
+    GLuint   vao = 0, eb = 0, prog = 0;
+    GLenum   type = 0, mode = 0;
+    uint64_t h1 = 0, h1a = 0, wh1a = 0;
+    uint64_t hits = 0;
+    bool     exact = false;
+    std::string layout;
+    char     kind[4] = {0};
+};
+
+std::map<Key, Rec> g_recs;
+
+void dump_stats() {
+    if (!open_out()) return;
+    std::vector<const std::pair<const Key, Rec>*> v;
+    v.reserve(g_recs.size());
+    for (const auto& kv : g_recs) v.push_back(&kv);
+    std::sort(v.begin(), v.end(), [](auto* a, auto* b) { return a->second.hits > b->second.hits; });
+    freopen((std::string(g_dir) + "/gles.tsv").c_str(), "w", g_fp);
+    fprintf(g_fp, "# hits\tib_hash(fnv1)\tib_fnv1a\twhole_fnv1a\tfirst_index\tidx_count\tidx_type\tmode\tprog\tvao\teb\tkind\tsub_exact\tvtx_layout\n");
+    size_t n = 0;
+    for (auto* p : v) {
+        if (n++ >= 4000) break;
+        const Rec& r = p->second;
+        fprintf(g_fp, "%llu\t%08llx\t%08llx\t%08llx\t%u\t%u\t%x\t%x\t%u\t%u\t%u\t%s\t%d\t%s\n",
+                (unsigned long long)r.hits, (unsigned long long)p->first.wh1,
+                (unsigned long long)r.h1a, (unsigned long long)r.wh1a,
+                p->first.first, p->first.cnt, r.type, r.mode, r.prog, r.vao, r.eb,
+                r.kind, r.exact ? 1 : 0, r.layout.c_str());
+    }
+    fflush(g_fp);
+}
+
 void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
     GLuint eb = cur_elem();
     const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
     uint64_t h1 = 0, h1a = 0, wh1 = 0, wh1a = 0;
     uint32_t first = 0;
-    GLsizeiptr bsz = 0;
     bool exact = false;
 
     auto it = g_bufs.find(eb);
     if (eb && it != g_bufs.end()) {
-        bsz = it->second.size;
         wh1 = it->second.h1; wh1a = it->second.h1a;
         size_t off = (size_t)(uintptr_t)indices;
         size_t bytes = (size_t)count * esz;
@@ -256,27 +301,31 @@ void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
         }
     }
 
-    uint64_t key = (h1 << 24) ^ ((uint64_t)first << 8) ^ ((uint64_t)count << 40) ^ (uint64_t)type;
-    if (!g_seen.insert(key).second || g_unique >= 20000) return;
-    g_unique++;
+    Key k{wh1, first, (uint32_t)count};
+    auto it2 = g_recs.find(k);
+    if (it2 == g_recs.end()) {
+        if (g_recs.size() >= 60000) return;
+        Rec r;
+        r.vao = g_curVao; r.eb = eb; r.prog = g_curProg;
+        r.type = type; r.mode = mode;
+        r.h1 = h1; r.h1a = h1a; r.wh1a = wh1a;
+        r.exact = exact;
+        r.layout = layout_of(g_curVao);
+        strncpy(r.kind, kind, sizeof(r.kind) - 1);
+        it2 = g_recs.emplace(k, std::move(r)).first;
+        g_unique++;
+        if (g_unique <= 200) {
+            LOGI("NEW%s ib=%08llx first=%u cnt=%u type=%x prog=%u %s",
+                 kind, (unsigned long long)wh1, first, (unsigned)count, type, g_curProg,
+                 it2->second.layout.c_str());
+        }
+    }
+    it2->second.hits++;
 
-    std::string lay = layout_of(g_curVao);
-    if (open_out()) {
-        fprintf(g_fp, "%u\t%u\t%08llx\t%08llx\t%08llx\t%08llx\t%u\t%d\t%x\t%x\t%u\t%s\t%s\t%d\n",
-                g_curVao, eb, (unsigned long long)h1, (unsigned long long)h1a,
-                (unsigned long long)wh1, (unsigned long long)wh1a,
-                first, (int)count, type, mode, g_curProg, kind, lay.c_str(), exact ? 1 : 0);
-        fflush(g_fp);
-    }
-    if (g_unique <= 300) {
-        LOGI("DRAW%s eb=%u sz=%lld h1=%08llx h1a=%08llx whole=%08llx first=%u cnt=%d type=%x prog=%u%s",
-             kind, eb, (long long)bsz, (unsigned long long)h1, (unsigned long long)h1a,
-             (unsigned long long)wh1, first, (int)count, type, g_curProg,
-             exact ? "" : " (whole)");
-    }
-    if (g_unique % 100 == 0) {
-        LOGI("STAT u=%llu draws=%llu egl=%llu dlsym=%llu bindBuf=%llu vao=%llu genBuf=%llu bufData=%llu useProg=%llu attrib=%llu",
-             (unsigned long long)g_unique, (unsigned long long)c_draw.load(),
+    if (c_draw % 3000 == 0) {
+        dump_stats();
+        LOGI("STAT keys=%llu draws=%llu egl=%llu dlsym=%llu bindBuf=%llu vao=%llu genBuf=%llu bufData=%llu useProg=%llu attrib=%llu",
+             (unsigned long long)g_recs.size(), (unsigned long long)c_draw.load(),
              (unsigned long long)c_egl.load(), (unsigned long long)c_dlsym.load(),
              (unsigned long long)c_bindBuf.load(), (unsigned long long)c_vao.load(),
              (unsigned long long)c_genBuf.load(), (unsigned long long)c_bufData.load(),
