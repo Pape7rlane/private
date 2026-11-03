@@ -724,11 +724,11 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.done = true;
             }
         } else if (pt.action == 6) {
-            // 每 500 次命中覆盖一次, 抓"角色真正在画面里"那一帧
-            if ((pt.hits++ % 500) != 0) continue;
+            // 只抓一次: 打印完整布局 + 每个属性流原始字节
+            if (pt.done) continue;
+            pt.done = true;
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end()) continue;
-            // 顶点数 = 索引最大值 + 1
             uint32_t vcount = 0;
             if (it != g_bufs.end() && !it->second.data.empty()) {
                 const uint16_t* ip = (const uint16_t*)it->second.data.data();
@@ -739,51 +739,58 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             std::string meta = base + ".txt";
             FILE* mf = fopen(meta.c_str(), "w");
             if (!mf) continue;
-            fprintf(mf, "ib_hash=%08llx first=%u count=%u type=%x vao=%u verts=%u\n",
-                    (unsigned long long)wh1, first, (unsigned)count, type, g_curVao, vcount);
+            fprintf(mf, "ib_hash=%08llx first=%u count=%u type=%x vao=%u verts=%u prog=%u\n",
+                    (unsigned long long)wh1, first, (unsigned)count, type, g_curVao, vcount, g_curProg);
+            LOGI("DUMP %08llx first=%u cnt=%u verts=%u vao=%u prog=%u",
+                 (unsigned long long)wh1, first, (unsigned)count, vcount, g_curVao, g_curProg);
             for (int i = 0; i < 16; i++) {
                 const Attr& a = vit->second.attr[i];
                 if (!a.has) continue;
-                auto bit = g_bufs.find(a.buf);
-                size_t bsz = (bit == g_bufs.end()) ? 0 : bit->second.data.size();
-                size_t decl = (bit == g_bufs.end()) ? 0 : (size_t)bit->second.size;
-                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u bytes=%zu declared=%zu\n",
-                        i, a.size, a.type, a.stride, a.buf, bsz, decl);
-                if (!a.buf || a.stride <= 0) continue;
-
-                // 直接从 GPU 映射读回
+                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u ptr=%p\n",
+                        i, a.size, a.type, a.stride, a.buf, a.ptr);
+                LOGI("  a%d size=%d type=%x stride=%d buf=%u ptr=%p",
+                     i, a.size, a.type, a.stride, a.buf, a.ptr);
+                if (!a.buf || a.stride <= 0 || !vcount) continue;
                 size_t want = (size_t)vcount * (size_t)a.stride;
-                if (!want || want > (8u << 20)) continue;
+                if (want > (8u << 20)) { fprintf(mf, "  skip big\n"); continue; }
                 GLuint savedArr = g_curArray;
-                GLenum savedElem = 0; (void)savedElem;
                 o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
-                void* mp = o_glMapBufferRange ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want,
-                                                                   GL_MAP_READ_BIT) : nullptr;
-                if (mp) {
-                    char fn[256];
-                    snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
-                    FILE* bf = fopen(fn, "wb");
-                    if (bf) { fwrite(mp, 1, want, bf); fclose(bf); }
-                    if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
-                    fprintf(mf, "  mapped=1 wrote=%zu\n", want);
-                    if (i == 0 && a.size == 3 && a.type == GL_FLOAT) {
-                        const float* f = (const float*)mp;
-                        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
-                        for (uint32_t k = 0; k < vcount; k++) {
-                            for (int c = 0; c < 3; c++) {
-                                float v = f[(size_t)k * (a.stride / 4) + c];
-                                if (v != v || v > 1e6f || v < -1e6f) continue;
-                                if (v < lo[c]) lo[c] = v;
-                                if (v > hi[c]) hi[c] = v;
-                            }
-                        }
-                        LOGI("MESH bbox %.3f %.3f %.3f -> %.3f %.3f %.3f prog=%u",
-                             lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], g_curProg);
-                    }
-                } else {
-                    fprintf(mf, "  mapped=0\n");
-                }
+                void* mp = o_glMapBufferRange
+                               ? o_glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)(uintptr_t)a.ptr,
+                                                    (GLsizeiptr)want, GL_MAP_READ_BIT)
+                               : nullptr;
+                if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); fprintf(mf, "  mapped=0\n"); continue; }
+                char fn[256];
+                snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
+                FILE* bf = fopen(fn, "wb");
+                if (bf) { fwrite(mp, 1, want, bf); fclose(bf); }
+                std::vector<uint8_t> copy((const uint8_t*)mp, (const uint8_t*)mp + want);
+                if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
                 o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                fprintf(mf, "  mapped=1 wrote=%zu\n", want);
+                for (int v = 0; v < 2 && (size_t)(v + 1) * (size_t)a.stride <= copy.size(); v++) {
+                    std::string hex;
+                    char hb[4];
+                    size_t lim = (size_t)a.stride < 32 ? (size_t)a.stride : 32;
+                    for (size_t q = 0; q < lim; q++) {
+                        snprintf(hb, sizeof hb, "%02x", copy[v * (size_t)a.stride + q]);
+                        hex += hb;
+                    }
+                    fprintf(mf, "  v%d %s\n", v, hex.c_str());
+                }
+                if (i == 0 && a.size >= 3 && a.type == GL_FLOAT) {
+                    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+                    for (uint32_t k = 0; k < vcount; k++) {
+                        const float* f = (const float*)(copy.data() + (size_t)k * (size_t)a.stride);
+                        for (int c = 0; c < 3; c++) {
+                            float v = f[c];
+                            if (v != v || v > 1e6f || v < -1e6f) continue;
+                            if (v < lo[c]) lo[c] = v;
+                            if (v > hi[c]) hi[c] = v;
+                        }
+                    }
+                    LOGI("  bbox %.3f %.3f %.3f -> %.3f %.3f %.3f", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+                }
             }
             fclose(mf);
             LOGI("dumped mesh %s verts=%u", base.c_str(), vcount);
