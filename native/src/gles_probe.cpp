@@ -522,6 +522,35 @@ GLuint g_overrideBuf = 0;
 GLsizei g_overrideCount = 0;
 GLenum g_overrideType = GL_UNSIGNED_SHORT;
 
+struct LiveAttr { bool enabled=false; GLint size=0; GLenum type=0; GLsizei stride=0;
+                  GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
+
+void capture_vao(LiveAttr out[16]) {
+    typedef void (*PFNGETIV)(GLuint, GLenum, GLint*);
+    typedef void (*PFNGETPTR)(GLuint, GLenum, void**);
+    static PFNGETIV  pGetIv  = nullptr;
+    static PFNGETPTR pGetPtr = nullptr;
+    if (!pGetIv)  pGetIv  = (PFNGETIV)gl_real("glGetVertexAttribiv");
+    if (!pGetPtr) pGetPtr = (PFNGETPTR)gl_real("glGetVertexAttribPointerv");
+    for (int i = 0; i < 16; i++) out[i] = LiveAttr();
+    if (!pGetIv || !pGetPtr) return;
+    for (int i = 0; i < 16; i++) {
+        GLint en = 0, sz = 0, ty = 0, st = 0, nm = 0, bd = 0;
+        void* pt = nullptr;
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+        if (!en) continue;
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &sz);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &ty);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &st);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &nm);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &bd);
+        pGetPtr((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &pt);
+        out[i].enabled = true; out[i].size = sz; out[i].type = (GLenum)ty;
+        out[i].stride = st; out[i].norm = (GLboolean)nm;
+        out[i].buf = (GLuint)bd; out[i].ptr = pt;
+    }
+}
+
 // 顶点属性临时重绑（支持多个属性）
 struct VbBind { int idx = -1; GLuint newBuf = 0; Attr saved; };
 std::vector<VbBind> g_vbBinds;
