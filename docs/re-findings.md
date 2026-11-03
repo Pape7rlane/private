@@ -99,3 +99,24 @@ tools/ptrscan.c     在内存里找连续的指针数组
     su -c "./memdump -m <pid> libil2cpp"
     su -c "./memdump -d <pid> 0x<addr> 64"
     su -c "./ptrscan <pid> <lo_hex> <hi_hex> 100"
+
+## 7. Unity 版本（补充）
+
+    libunity.so   -> 2019.4.34f1
+    libil2cpp.so  -> 2025.5.001 (米哈游自己的引擎版本串)
+
+Unity 2019.4.34f1 对应的 metadata 版本是 24.1，Il2CppDumper 本身支持。
+所以只要能把 105MB 的 MHY 容器解出来，静态路线立刻就活了。
+
+注意 il2cpp 被米哈游改过（导出了 il2cpp_noelle_lock_world_mutex 这类符号，
+"noelle" 是他们内部代号），所以 API 表的索引顺序不能直接套 Unity 官方枚举，
+需要实测。
+
+## 8. 下一步（按优先级）
+
+1. 逆 global-metadata.dat 的解密。.rodata 里有明文的 "global-metadata" 字符串
+   （运行时可搜到，见第 3 节），从它 xref 到解析函数，顺着找解密循环。
+   解出来就是标准 v24.1 metadata，Il2CppDumper 直接出 dump.cs，后面全是体力活。
+2. 或者走 API 表：dump 表内容，按函数体特征逐个确认索引，再枚举类/方法。
+3. 拿到 RVA 之后照抄 GIBox 的 hook 结构（bindMesh / lodBind / meshBones / receive）。
+
