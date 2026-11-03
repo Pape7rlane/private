@@ -652,6 +652,8 @@ void install_hooks() {
 
 // ---------------------------------------------------------------- 入口
 
+extern "C" void il2cpp_probe_start();
+
 __attribute__((constructor)) static void probe_on_load() {
     init_pkg();
     g_out = pick_out_dir();
@@ -663,6 +665,7 @@ __attribute__((constructor)) static void probe_on_load() {
         return;
     }
     install_hooks();
+    il2cpp_probe_start();
     LOGI("hsrprobe ready");
 }
 
