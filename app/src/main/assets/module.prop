@@ -1,0 +1,6 @@
+id=hsrmodprobe
+name=HSRModProbe
+version=0.1.0
+versionCode=1
+author=local
+description=HSR 安卓 Vulkan drawcall / 顶点布局探针
