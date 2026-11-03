@@ -36,6 +36,7 @@ object NativeLoader {
         }
 
         val out = File(dir, LIB)
+        if (out.exists()) out.delete()
         ZipFile(apk).use { zip ->
             val entry = zip.getEntry("lib/" + abi + "/" + LIB)
                 ?: throw IllegalStateException("no " + abi + " " + LIB + " in module apk")
@@ -45,6 +46,8 @@ object NativeLoader {
         }
         out.setReadable(true, false)
         out.setExecutable(true, false)
+        // Android 14+ 禁止 dlopen 应用可写目录里的文件, 必须置只读
+        out.setWritable(false, false)
 
         XposedBridge.log("[hsrprobe] loading " + out.absolutePath)
         System.load(out.absolutePath)
