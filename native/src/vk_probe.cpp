@@ -652,10 +652,7 @@ void install_hooks() {
 
 // ---------------------------------------------------------------- 入口
 
-// gles_probe.cpp 需要输出目录
-extern "C" const char* hsr_out_dir() { return g_out.c_str(); }
-
-void gles_probe_start();
+void gles_probe_start(const char* out_dir);
 
 __attribute__((constructor)) static void probe_on_load() {
     init_pkg();
@@ -668,7 +665,7 @@ __attribute__((constructor)) static void probe_on_load() {
         return;
     }
     install_hooks();
-    gles_probe_start();
+    gles_probe_start(g_out.c_str());
     LOGI("hsrprobe ready");
 }
 
