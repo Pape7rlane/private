@@ -136,6 +136,8 @@ decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 decltype(&glDrawElementsInstanced) o_glDrawElementsInstanced = nullptr;
 decltype(&glDrawRangeElements) o_glDrawRangeElements = nullptr;
+decltype(&glMapBufferRange)  o_glMapBufferRange  = nullptr;
+decltype(&glUnmapBuffer)     o_glUnmapBuffer     = nullptr;
 
 void* gl_real(const char* name) {
     void* p = nullptr;
@@ -154,7 +156,16 @@ void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
     if (!id || size <= 0) return;
     BufInfo& b = g_bufs[id];
     b.size = size; b.target = target;   // 声明大小, 无论是否缓存数据
-    if (!data) return;
+    if (!data) {
+        // 先分配后填充: 留一块零缓冲等 glBufferSubData / glMapBufferRange 补
+        g_dataBytes -= b.data.size();
+        if ((size_t)size <= kDataPerBuf && g_dataBytes + (size_t)size <= kDataBudget)
+            b.data.assign((size_t)size, 0);
+        else
+            b.data.clear();
+        g_dataBytes += b.data.size();
+        return;
+    }
     const uint8_t* p = (const uint8_t*)data;
     b.h_ib = buffer_hash(p, (size_t)size, 2u);
     b.h_vb = buffer_hash(p, (size_t)size, 1u);
@@ -201,7 +212,7 @@ void glDeleteBuffers_hook(GLsizei n, const GLuint* buffers) {
 void glBufferData_hook(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     RESOLVE(o_glBufferData, "glBufferData");
     c_bufData++;
-    if (data && size > 0) {
+    if (size > 0) {
         GLuint id = (target == GL_ELEMENT_ARRAY_BUFFER) ? cur_elem() : g_curArray;
         record_index(id, size, data, target);
     }
@@ -216,6 +227,8 @@ void glBufferSubData_hook(GLenum target, GLintptr offset, GLsizeiptr size, const
     } else if (g_curArray && size > 0) {
         auto& b = g_bufs[g_curArray];
         if (b.size < offset + size) b.size = offset + size;
+        if (data && !b.data.empty() && (size_t)(offset + size) <= b.data.size())
+            memcpy(b.data.data() + offset, data, (size_t)size);
     }
     o_glBufferSubData(target, offset, size, data);
 }
@@ -236,6 +249,36 @@ void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean
         a.has = true; a.size = size; a.type = type; a.stride = stride; a.buf = g_curArray;
     }
     o_glVertexAttribPointer(index, size, type, normalized, stride, pointer);
+}
+
+struct MapState { void* ptr = nullptr; GLuint buf = 0; GLintptr off = 0; GLsizeiptr len = 0; };
+MapState g_mapArr, g_mapElem;
+
+void* glMapBufferRange_hook(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    RESOLVE(o_glMapBufferRange, "glMapBufferRange");
+    void* p = o_glMapBufferRange(target, offset, length, access);
+    if (p) {
+        MapState& m = (target == GL_ELEMENT_ARRAY_BUFFER) ? g_mapElem : g_mapArr;
+        m.ptr = p;
+        m.buf = (target == GL_ELEMENT_ARRAY_BUFFER) ? cur_elem() : g_curArray;
+        m.off = offset;
+        m.len = length;
+    }
+    return p;
+}
+
+GLboolean glUnmapBuffer_hook(GLenum target) {
+    if (!o_glUnmapBuffer) o_glUnmapBuffer = (decltype(&glUnmapBuffer))gl_real("glUnmapBuffer");
+    if (!o_glUnmapBuffer) return GL_TRUE;
+    MapState& m = (target == GL_ELEMENT_ARRAY_BUFFER) ? g_mapElem : g_mapArr;
+    if (m.ptr) {
+        auto it = g_bufs.find(m.buf);
+        if (it != g_bufs.end() && !it->second.data.empty() &&
+            (size_t)(m.off + m.len) <= it->second.data.size())
+            memcpy(it->second.data.data() + m.off, m.ptr, (size_t)m.len);
+        m.ptr = nullptr;
+    }
+    return o_glUnmapBuffer(target);
 }
 
 std::string layout_of(GLuint vao) {
@@ -615,6 +658,8 @@ const Entry kEntries[] = {
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
     {"glDrawRangeElements",     (void*)&glDrawRangeElements_hook,     (void**)&o_glDrawRangeElements},
+    {"glMapBufferRange",        (void*)&glMapBufferRange_hook,        (void**)&o_glMapBufferRange},
+    {"glUnmapBuffer",           (void*)&glUnmapBuffer_hook,           (void**)&o_glUnmapBuffer},
 };
 
 void* lookup_entry(const char* name) {
