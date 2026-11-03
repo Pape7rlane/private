@@ -4,6 +4,10 @@ project(hsrprobe C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 不生成调试信息: 编译更快, .so 更小, 探针用不到
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g0")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g0")
+
 # Dobby: 只编静态库, 不开 example/test
 set(DOBBY_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(DOBBY_BUILD_TEST OFF CACHE BOOL "" FORCE)
