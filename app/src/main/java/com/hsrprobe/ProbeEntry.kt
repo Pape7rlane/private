@@ -1,42 +1,33 @@
 package com.hsrprobe
 
+import android.util.Log
 import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 class ProbeEntry : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
+        // 这行必须最先打, 用来判断 LSPosed 到底有没有把模块注入进来
+        Log.i(TAG, "handleLoadPackage: " + lpparam.packageName + " / " + lpparam.processName)
+
         if (PREFIXES.none { lpparam.packageName.startsWith(it) }) return
-        XposedBridge.log("[hsrprobe] target: " + lpparam.packageName)
+        Log.i(TAG, "target matched: " + lpparam.packageName)
 
         try {
-            XposedHelpers.findAndHookMethod(
-                "android.app.Instrumentation",
-                lpparam.classLoader,
-                "callApplicationOnCreate",
-                android.app.Application::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        try {
-                            NativeLoader.load(lpparam)
-                        } catch (t: Throwable) {
-                            XposedBridge.log("[hsrprobe] native load failed")
-                            XposedBridge.log(t)
-                        }
-                    }
-                }
-            )
+            NativeLoader.load(lpparam)
+            Log.i(TAG, "native loaded")
         } catch (t: Throwable) {
-            XposedBridge.log("[hsrprobe] hook failed")
-            XposedBridge.log(t)
+            Log.e(TAG, "native load failed", t)
+            try {
+                XposedBridge.log(t)
+            } catch (_: Throwable) {
+            }
         }
     }
 
     companion object {
-        // 前缀匹配, 正式服 / B服 / 国际服 / CBT 测试服 全都覆盖
+        const val TAG = "hsrprobe"
         private val PREFIXES = listOf(
             "com.miHoYo.hkrpg",
             "com.HoYoverse.hkrpg"
