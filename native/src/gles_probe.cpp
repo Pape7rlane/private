@@ -36,7 +36,7 @@ char g_dir[512] = {0};
 
 // ---------------------------------------------------------------- 状态
 
-struct Attr { bool has=false; GLint size=0; GLenum type=0; GLsizei stride=0; GLuint buf=0; };
+struct Attr { bool has=false; GLint size=0; GLenum type=0; GLsizei stride=0; GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
 struct VaoState { GLuint elem = 0; Attr attr[16]; };
 struct BufInfo {
     GLsizeiptr size = 0;
@@ -247,6 +247,7 @@ void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean
     if (index < 16) {
         Attr& a = g_vaos[g_curVao].attr[index];
         a.has = true; a.size = size; a.type = type; a.stride = stride; a.buf = g_curArray;
+        a.ptr = pointer; a.norm = normalized;
     }
     o_glVertexAttribPointer(index, size, type, normalized, stride, pointer);
 }
@@ -305,6 +306,8 @@ struct Patch {
     std::string file;
     bool        done = false;
     uint32_t    hits = 0;
+    uint32_t    attrIdx = 0;
+    float       factor = 1.0f;
     // ib 替换
     std::vector<uint8_t> ib;
     GLuint      glBuf = 0;
@@ -354,6 +357,15 @@ void load_patches() {
             if (n >= 4) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a3, nullptr, 0); }
             if (n >= 5) pt.drawCount = (uint32_t)strtoul(a4, nullptr, 0);
             if (n >= 6) pt.ibType = strstr(a5, "32") ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+        } else if (!strcmp(cmd, "vbscale")) {
+            // vbscale <ibhash> <attr> <factor> [first]
+            if (n < 4) continue;
+            pt.action = 7;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.attrIdx = (uint32_t)strtoul(a2, nullptr, 0);
+            pt.factor = (float)atof(a3);
+            if (n >= 5) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a4, nullptr, 0); }
+            LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
         } else if (!strcmp(cmd, "dumpmesh")) {
             if (n < 3) continue;
             pt.action = 6;
@@ -439,6 +451,36 @@ GLuint g_overrideBuf = 0;
 GLsizei g_overrideCount = 0;
 GLenum g_overrideType = GL_UNSIGNED_SHORT;
 
+// 顶点属性临时重绑
+int    g_vbAttr = -1;
+GLuint g_vbBuf  = 0;
+Attr   g_vbSaved;
+GLuint g_vbSavedArr = 0;
+
+void apply_vb() {
+    if (g_vbAttr < 0 || !g_vbBuf || !o_glBindBuffer || !o_glVertexAttribPointer) return;
+    auto vit = g_vaos.find(g_curVao);
+    if (vit == g_vaos.end()) { g_vbAttr = -1; return; }
+    g_vbSaved = vit->second.attr[g_vbAttr];
+    g_vbSavedArr = g_curArray;
+    o_glBindBuffer(GL_ARRAY_BUFFER, g_vbBuf);
+    o_glVertexAttribPointer((GLuint)g_vbAttr, g_vbSaved.size, g_vbSaved.type, g_vbSaved.norm,
+                            g_vbSaved.stride, g_vbSaved.ptr);
+    g_curArray = g_vbBuf;
+}
+
+void restore_vb() {
+    if (g_vbAttr < 0) return;
+    if (o_glBindBuffer && o_glVertexAttribPointer) {
+        o_glBindBuffer(GL_ARRAY_BUFFER, g_vbSaved.buf);
+        o_glVertexAttribPointer((GLuint)g_vbAttr, g_vbSaved.size, g_vbSaved.type, g_vbSaved.norm,
+                                g_vbSaved.stride, g_vbSaved.ptr);
+        o_glBindBuffer(GL_ARRAY_BUFFER, g_vbSavedArr);
+    }
+    g_curArray = g_vbSavedArr;
+    g_vbAttr = -1;
+}
+
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
     GLuint eb = cur_elem();
@@ -478,6 +520,47 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         if (pt.hasFirst && first != pt.first) continue;
         if (pt.hasCnt && (uint32_t)count != pt.cnt) continue;
         if (pt.action == 0) { c_skipped++; skip = true; continue; }
+        if (pt.action == 7) {
+            auto vit = g_vaos.find(g_curVao);
+            if (vit == g_vaos.end() || pt.attrIdx >= 16) continue;
+            const Attr& a = vit->second.attr[pt.attrIdx];
+            if (!a.has || !a.buf || a.stride <= 0) continue;
+            if (!pt.glBuf) {
+                uint32_t vcount = 0;
+                if (it != g_bufs.end() && !it->second.data.empty()) {
+                    const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                    size_t in = it->second.data.size() / 2;
+                    for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+                }
+                size_t want = (size_t)vcount * (size_t)a.stride;
+                if (!vcount || want > (8u << 20)) continue;
+                GLuint savedArr = g_curArray;
+                o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+                void* mp = o_glMapBufferRange
+                               ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT)
+                               : nullptr;
+                if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+                std::vector<uint8_t> buf((const uint8_t*)mp, (const uint8_t*)mp + want);
+                if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+
+                size_t off = (size_t)(uintptr_t)a.ptr, vs = (size_t)a.stride;
+                for (size_t k = 0; k + off + 4 * (size_t)a.size <= buf.size(); k += vs) {
+                    float* f = (float*)(buf.data() + k + off);
+                    for (int c = 0; c < a.size; c++) f[c] *= pt.factor;
+                }
+                GLuint nb = 0;
+                o_glGenBuffers(1, &nb);
+                o_glBindBuffer(GL_ARRAY_BUFFER, nb);
+                o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)buf.size(), buf.data(), GL_STATIC_DRAW);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                pt.glBuf = nb;
+                LOGI("vbscale: attr%u verts=%u stride=%d -> buf %u", pt.attrIdx, vcount, a.stride, nb);
+            }
+            g_vbAttr = (int)pt.attrIdx;
+            g_vbBuf = pt.glBuf;
+            continue;
+        }
         if (pt.action == 5) {
             if (!pt.glBuf && !pt.ib.empty() && o_glGenBuffers && o_glBindBuffer && o_glBufferData) {
                 GLuint nb = 0;
@@ -643,40 +726,47 @@ void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* in
     RESOLVE(o_glDrawElements, "glDrawElements");
     int act = on_draw("", mode, count, type, indices);
     if (act == 1) return;
+    apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
         o_glDrawElements(mode, g_overrideCount, g_overrideType, 0);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
-        return;
+    } else {
+        o_glDrawElements(mode, count, type, indices);
     }
-    o_glDrawElements(mode, count, type, indices);
+    restore_vb();
 }
 void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n) {
     RESOLVE(o_glDrawElementsInstanced, "glDrawElementsInstanced");
     int act = on_draw("I", mode, count, type, indices);
     if (act == 1) return;
+    apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
         o_glDrawElementsInstanced(mode, g_overrideCount, g_overrideType, 0, n);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
-        return;
+    } else {
+        o_glDrawElementsInstanced(mode, count, type, indices, n);
     }
-    o_glDrawElementsInstanced(mode, count, type, indices, n);
+    restore_vb();
 }
 void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawRangeElements, "glDrawRangeElements");
     int act = on_draw("R", mode, count, type, indices);
     if (act == 1) return;
+    apply_vb();
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
         o_glDrawRangeElements(mode, 0, g_overrideCount, g_overrideCount, g_overrideType, 0);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
+        restore_vb();
         return;
     }
     o_glDrawRangeElements(mode, start, end, count, type, indices);
+    restore_vb();
 }
 
 // ---------------------------------------------------------------- 表
