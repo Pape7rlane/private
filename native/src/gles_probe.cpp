@@ -502,11 +502,47 @@ GLuint g_vbBuf  = 0;
 Attr   g_vbSaved;
 GLuint g_vbSavedArr = 0;
 
+struct LiveAttr { bool enabled=false; GLint size=0; GLenum type=0; GLsizei stride=0;
+                  GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
+
+void capture_vao(LiveAttr out[16]) {
+    typedef void (*PFNGETIV)(GLuint, GLenum, GLint*);
+    typedef void (*PFNGETPTR)(GLuint, GLenum, void**);
+    static PFNGETIV  pGetIv  = nullptr;
+    static PFNGETPTR pGetPtr = nullptr;
+    if (!pGetIv)  pGetIv  = (PFNGETIV)gl_real("glGetVertexAttribiv");
+    if (!pGetPtr) pGetPtr = (PFNGETPTR)gl_real("glGetVertexAttribPointerv");
+    for (int i = 0; i < 16; i++) { out[i] = LiveAttr(); if (!pGetIv || !pGetPtr) continue; }
+    if (!pGetIv || !pGetPtr) return;
+    for (int i = 0; i < 16; i++) {
+        GLint en = 0, sz = 0, ty = 0, st = 0, nm = 0, bd = 0;
+        void* pt = nullptr;
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+        if (!en) continue;
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &sz);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &ty);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &st);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &nm);
+        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &bd);
+        pGetPtr((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &pt);
+        out[i].enabled = true; out[i].size = sz; out[i].type = (GLenum)ty;
+        out[i].stride = st; out[i].norm = (GLboolean)nm;
+        out[i].buf = (GLuint)bd; out[i].ptr = pt;
+    }
+}
+
 void apply_vb() {
     if (g_vbAttr < 0 || !g_vbBuf || !o_glBindBuffer || !o_glVertexAttribPointer) return;
-    auto vit = g_vaos.find(g_curVao);
-    if (vit == g_vaos.end()) { g_vbAttr = -1; return; }
-    g_vbSaved = vit->second.attr[g_vbAttr];
+    LiveAttr la[16];
+    capture_vao(la);
+    if (g_vbAttr >= 16 || !la[g_vbAttr].enabled) { g_vbAttr = -1; return; }
+    g_vbSaved.has = true;
+    g_vbSaved.size = la[g_vbAttr].size;
+    g_vbSaved.type = la[g_vbAttr].type;
+    g_vbSaved.stride = la[g_vbAttr].stride;
+    g_vbSaved.buf = la[g_vbAttr].buf;
+    g_vbSaved.ptr = la[g_vbAttr].ptr;
+    g_vbSaved.norm = la[g_vbAttr].norm;
     g_vbSavedArr = g_curArray;
     o_glBindBuffer(GL_ARRAY_BUFFER, g_vbBuf);
     o_glVertexAttribPointer((GLuint)g_vbAttr, g_vbSaved.size, g_vbSaved.type, g_vbSaved.norm,
@@ -567,10 +603,15 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         if (pt.hasCnt && (uint32_t)count != pt.cnt) continue;
         if (pt.action == 0) { c_skipped++; skip = true; continue; }
         if (pt.action == 7) {
-            auto vit = g_vaos.find(g_curVao);
-            if (vit == g_vaos.end() || pt.attrIdx >= 16) continue;
-            const Attr& a = vit->second.attr[pt.attrIdx];
-            if (!a.has || !a.buf || a.stride <= 0) continue;
+            if (pt.attrIdx >= 16) continue;
+            LiveAttr la[16];
+            capture_vao(la);
+            if (!la[pt.attrIdx].enabled) continue;
+            Attr a;
+            a.has = true; a.size = la[pt.attrIdx].size; a.type = la[pt.attrIdx].type;
+            a.stride = la[pt.attrIdx].stride; a.buf = la[pt.attrIdx].buf;
+            a.ptr = la[pt.attrIdx].ptr; a.norm = la[pt.attrIdx].norm;
+            if (!a.buf || a.stride <= 0) continue;
             if (!pt.glBuf) {
                 uint32_t vcount = 0;
                 if (it != g_bufs.end() && !it->second.data.empty()) {
@@ -651,10 +692,15 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             continue;
         }
         if (pt.action == 8) {
-            auto vit = g_vaos.find(g_curVao);
-            if (vit == g_vaos.end() || pt.attrIdx >= 16) continue;
-            const Attr& a = vit->second.attr[pt.attrIdx];
-            if (!a.has || !a.buf || a.stride <= 0) continue;
+            if (pt.attrIdx >= 16) continue;
+            LiveAttr la[16];
+            capture_vao(la);
+            if (!la[pt.attrIdx].enabled) continue;
+            Attr a;
+            a.has = true; a.size = la[pt.attrIdx].size; a.type = la[pt.attrIdx].type;
+            a.stride = la[pt.attrIdx].stride; a.buf = la[pt.attrIdx].buf;
+            a.ptr = la[pt.attrIdx].ptr; a.norm = la[pt.attrIdx].norm;
+            if (!a.buf || a.stride <= 0) continue;
             if (!pt.glBuf) {
                 uint32_t vcount = 0;
                 if (it != g_bufs.end() && !it->second.data.empty()) {
@@ -754,9 +800,13 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     (unsigned long long)wh1, first, (unsigned)count, type, g_curVao, vcount, g_curProg);
             LOGI("DUMP %08llx first=%u cnt=%u verts=%u vao=%u prog=%u",
                  (unsigned long long)wh1, first, (unsigned)count, vcount, g_curVao, g_curProg);
+            LiveAttr la[16];
+            capture_vao(la);
             for (int i = 0; i < 16; i++) {
-                const Attr& a = vit->second.attr[i];
-                if (!a.has) continue;
+                if (!la[i].enabled) continue;
+                struct { GLint size; GLenum type; GLsizei stride; GLuint buf; const void* ptr; } a;
+                a.size = la[i].size; a.type = la[i].type; a.stride = la[i].stride;
+                a.buf = la[i].buf; a.ptr = la[i].ptr;
                 GLint bufsz = 0;
                 {
                     typedef void (*PFNGETBUF)(GLenum, GLenum, GLint*);
