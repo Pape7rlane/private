@@ -40,8 +40,8 @@ struct Attr { bool has=false; GLint size=0; GLenum type=0; GLsizei stride=0; GLu
 struct VaoState { GLuint elem = 0; Attr attr[16]; };
 struct BufInfo {
     GLsizeiptr size = 0;
-    uint64_t   h1   = 0;   // 整段 FNV-1
-    uint64_t   h1a  = 0;   // 整段 FNV-1a
+    uint32_t   h_ib = 0;   // 3Dmigoto IB 哈希 (crc32c + BUFFER_DESC bind=0x2)
+    uint32_t   h_vb = 0;   // 3Dmigoto VB 哈希 (crc32c + BUFFER_DESC bind=0x1)
     GLenum     target = 0;
     std::vector<uint8_t> data;   // 索引缓冲副本, 用于按 draw 子段哈希
 };
@@ -89,16 +89,33 @@ void log_name(const char* who, const char* name) {
     fflush(g_fpNames);
 }
 
-uint32_t fnv1_32(const uint8_t* p, size_t n) {
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++) h = (h * 16777619u) ^ p[i];
-    return h;
+// ---- CRC32C (Castagnoli), 3Dmigoto 用的就是它 ----
+uint32_t g_crcTab[256];
+bool     g_crcInit = false;
+
+void crc_init() {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1) ? ((c >> 1) ^ 0x82F63B78u) : (c >> 1);
+        g_crcTab[i] = c;
+    }
+    g_crcInit = true;
 }
-uint32_t fnv1a_32(const uint8_t* p, size_t n) {
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
-    return h;
+
+uint32_t crc32c(uint32_t crc, const uint8_t* p, size_t n) {
+    if (!g_crcInit) crc_init();
+    crc ^= 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) crc = g_crcTab[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
 }
+
+// 3Dmigoto: hash = crc32c(crc32c(0, data, ByteWidth), &D3D11_BUFFER_DESC, 24)
+uint32_t buffer_hash(const uint8_t* data, size_t size, uint32_t bind) {
+    uint32_t base = crc32c(0, data, size);
+    uint32_t desc[6] = {(uint32_t)size, 0u, bind, 0u, 0u, 0u};
+    return crc32c(base, (const uint8_t*)desc, sizeof(desc));
+}
+
 
 GLuint cur_elem() {
     auto it = g_vaos.find(g_curVao);
@@ -137,8 +154,8 @@ void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
     BufInfo& b = g_bufs[id];
     b.size = size; b.target = target;
     const uint8_t* p = (const uint8_t*)data;
-    b.h1  = fnv1_32(p, (size_t)size);
-    b.h1a = fnv1a_32(p, (size_t)size);
+    b.h_ib = buffer_hash(p, (size_t)size, 2u);
+    b.h_vb = buffer_hash(p, (size_t)size, 1u);
 
     // 索引缓冲用于子段哈希, 顶点缓冲用于导出位置
     if ((size_t)size > kDataPerBuf || g_dataBytes + (size_t)size > kDataBudget) {
@@ -337,14 +354,14 @@ void dump_stats() {
     for (const auto& kv : g_recs) v.push_back(&kv);
     std::sort(v.begin(), v.end(), [](auto* a, auto* b) { return a->second.hits > b->second.hits; });
     freopen((std::string(g_dir) + "/gles.tsv").c_str(), "w", g_fp);
-    fprintf(g_fp, "# hits\tib_hash(fnv1)\tib_fnv1a\twhole_fnv1a\tfirst_index\tidx_count\tidx_type\tmode\tprog\tvao\teb\tkind\tsub_exact\tvtx_layout\n");
+    fprintf(g_fp, "# hits\tib_hash(crc32c)\tx\ty\tfirst_index\tidx_count\tidx_type\tmode\tprog\tvao\teb\tkind\tsub_exact\tvtx_layout\n");
     size_t n = 0;
     for (auto* p : v) {
         if (n++ >= 4000) break;
         const Rec& r = p->second;
         fprintf(g_fp, "%llu\t%08llx\t%08llx\t%08llx\t%u\t%u\t%x\t%x\t%u\t%u\t%u\t%s\t%d\t%s\n",
                 (unsigned long long)r.hits, (unsigned long long)p->first.wh1,
-                (unsigned long long)r.h1a, (unsigned long long)r.wh1a,
+                (unsigned long long)r.wh1a, (unsigned long long)r.wh1a,
                 p->first.first, p->first.cnt, r.type, r.mode, r.prog, r.vao, r.eb,
                 r.kind, r.exact ? 1 : 0, r.layout.c_str());
     }
@@ -365,22 +382,18 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
 
     auto it = g_bufs.find(eb);
     if (eb && it != g_bufs.end()) {
-        wh1 = it->second.h1; wh1a = it->second.h1a;
+        wh1 = it->second.h_ib; wh1a = 0;
         size_t off = (size_t)(uintptr_t)indices;
         size_t bytes = (size_t)count * esz;
         first = (uint32_t)(off / esz);
-        if (!it->second.data.empty() && off + bytes <= it->second.data.size()) {
-            h1  = fnv1_32(it->second.data.data() + off, bytes);
-            h1a = fnv1a_32(it->second.data.data() + off, bytes);
-            exact = true;
-        } else {
-            h1 = wh1; h1a = wh1a;
-        }
+        h1 = wh1; h1a = 0;
+        (void)off; (void)bytes;
+        exact = true;
     } else if (!eb && indices && count > 0) {
         size_t bytes = (size_t)count * esz;
         if (bytes <= (16 << 20)) {
-            h1  = fnv1_32((const uint8_t*)indices, bytes);
-            h1a = fnv1a_32((const uint8_t*)indices, bytes);
+            h1  = buffer_hash((const uint8_t*)indices, bytes, 2u);
+            h1a = 0;
             wh1 = h1; wh1a = h1a;
             exact = true;
         }
