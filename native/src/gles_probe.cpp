@@ -798,8 +798,11 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
 
             const size_t srcN = pt.ib.size() / 40;
             const size_t n = std::min((size_t)vcount, srcN);
-            if (!pt.dynReady || pt.dynSrcBuf != a.buf || pt.dynStride != a.stride ||
-                pt.dynOffset != off || pt.dynCount != vcount) {
+            // Unity may orphan/reallocate the source VBO every frame.  A new
+            // source buffer id is still the same skinned stream, so keep the
+            // reference pose across buffer ids and only reset on layout/count changes.
+            if (!pt.dynReady || pt.dynStride != a.stride || pt.dynOffset != off ||
+                pt.dynCount != vcount) {
                 pt.dynReady = true;
                 pt.dynPosAttr = pos;
                 pt.dynSrcBuf = a.buf;
