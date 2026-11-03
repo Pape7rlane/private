@@ -314,6 +314,9 @@ struct Patch {
     uint32_t    ibCount = 0;
     GLenum      ibType = GL_UNSIGNED_SHORT;
     uint32_t    drawCount = 0;   // 0 = 用原始 count
+    // vbpos 替换
+    uint32_t    srcStride = 0;
+    uint32_t    srcOffset = 0;
 };
 
 std::vector<Patch> g_patches;
@@ -366,6 +369,17 @@ void load_patches() {
             pt.factor = (float)atof(a3);
             if (n >= 5) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a4, nullptr, 0); }
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
+        } else if (!strcmp(cmd, "vbpos")) {
+            // vbpos <ibhash> <attr> <file> <srcStride> [srcOffset] [first]
+            if (n < 5) continue;
+            pt.action = 8;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.attrIdx = (uint32_t)strtoul(a2, nullptr, 0);
+            pt.file = a3;
+            pt.srcStride = (uint32_t)strtoul(a4, nullptr, 0);
+            if (n >= 6) pt.srcOffset = (uint32_t)strtoul(a5, nullptr, 0);
+            LOGI("patch vbpos hash=%08llx attr=%u src=%s stride=%u off=%u",
+                 (unsigned long long)pt.hash, pt.attrIdx, pt.file.c_str(), pt.srcStride, pt.srcOffset);
         } else if (!strcmp(cmd, "dumpmesh")) {
             if (n < 3) continue;
             pt.action = 6;
@@ -378,6 +392,17 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
         } else { LOGW("unknown patch cmd %s", cmd); continue; }
+        if (pt.action == 8) {
+            std::string fp = std::string(g_dir) + "/" + pt.file;
+            FILE* vf = fopen(fp.c_str(), "rb");
+            if (!vf) { LOGE("cannot open vbpos %s", fp.c_str()); continue; }
+            fseek(vf, 0, SEEK_END); long sz = ftell(vf); fseek(vf, 0, SEEK_SET);
+            if (sz <= 0 || sz > (64 << 20)) { fclose(vf); LOGE("bad vbpos size %ld", sz); continue; }
+            pt.ib.resize((size_t)sz);
+            if (fread(pt.ib.data(), 1, (size_t)sz, vf) != (size_t)sz) { fclose(vf); continue; }
+            fclose(vf);
+            LOGI("vbpos loaded %s %ld bytes = %ld verts", pt.file.c_str(), sz, sz / (long)pt.srcStride);
+        }
         if (pt.action == 5) {
             std::string fp = std::string(g_dir) + "/" + pt.file;
             FILE* ibf = fopen(fp.c_str(), "rb");
@@ -556,6 +581,55 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
                 pt.glBuf = nb;
                 LOGI("vbscale: attr%u verts=%u stride=%d -> buf %u", pt.attrIdx, vcount, a.stride, nb);
+            }
+            g_vbAttr = (int)pt.attrIdx;
+            g_vbBuf = pt.glBuf;
+            continue;
+        }
+        if (pt.action == 8) {
+            auto vit = g_vaos.find(g_curVao);
+            if (vit == g_vaos.end() || pt.attrIdx >= 16) continue;
+            const Attr& a = vit->second.attr[pt.attrIdx];
+            if (!a.has || !a.buf || a.stride <= 0) continue;
+            if (!pt.glBuf) {
+                uint32_t vcount = 0;
+                if (it != g_bufs.end() && !it->second.data.empty()) {
+                    const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                    size_t in = it->second.data.size() / 2;
+                    for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+                }
+                if (!vcount) continue;
+                size_t want = (size_t)vcount * (size_t)a.stride;
+                if (want > (16u << 20)) continue;
+                GLuint savedArr = g_curArray;
+                o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+                void* mp = o_glMapBufferRange
+                               ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT)
+                               : nullptr;
+                if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+                std::vector<uint8_t> buf((const uint8_t*)mp, (const uint8_t*)mp + want);
+                if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+
+                size_t dstOff = (size_t)(uintptr_t)a.ptr;
+                size_t copy = (size_t)a.size * 4;   // 假设 float
+                if (copy > 12) copy = 12;
+                size_t srcN = pt.ib.size() / pt.srcStride;
+                size_t n = std::min((size_t)vcount, srcN);
+                for (size_t i = 0; i < n; i++) {
+                    const uint8_t* sp = pt.ib.data() + i * pt.srcStride + pt.srcOffset;
+                    uint8_t* dp = buf.data() + i * (size_t)a.stride + dstOff;
+                    if ((size_t)a.stride < dstOff + copy) continue;
+                    memcpy(dp, sp, copy);
+                }
+                GLuint nb = 0;
+                o_glGenBuffers(1, &nb);
+                o_glBindBuffer(GL_ARRAY_BUFFER, nb);
+                o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)buf.size(), buf.data(), GL_STATIC_DRAW);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                pt.glBuf = nb;
+                LOGI("vbpos: attr%u verts=%u/%zu stride=%d copy=%zu -> buf %u",
+                     pt.attrIdx, vcount, n, a.stride, copy, nb);
             }
             g_vbAttr = (int)pt.attrIdx;
             g_vbBuf = pt.glBuf;
