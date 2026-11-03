@@ -329,6 +329,15 @@ struct Patch {
     float       scale = 1.0f;
     std::vector<uint8_t> blend, tex;
     std::vector<std::pair<int,GLuint>> binds;
+    // vbmoddyn: keep the replacement position in the game's current pose
+    bool dynReady = false;
+    int dynPosAttr = -1;
+    GLuint dynSrcBuf = 0;
+    GLsizei dynStride = 0;
+    size_t dynOffset = 0;
+    uint32_t dynCount = 0;
+    std::vector<uint8_t> dynBuf;
+    std::vector<float> dynRef;
 };
 
 std::vector<Patch> g_patches;
@@ -405,10 +414,10 @@ void load_patches() {
             if (n < 2) continue;
             pt.action = 11;
             pt.hash = strtoull(a1, nullptr, 16);
-        } else if (!strcmp(cmd, "vbmod")) {
+        } else if (!strcmp(cmd, "vbmod") || !strcmp(cmd, "vbmoddyn")) {
             // vbmod <ibhash> <posfile> <blendfile> <texfile>
             if (n < 5) continue;
-            pt.action = 10;
+            pt.action = !strcmp(cmd, "vbmoddyn") ? 12 : 10;
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
             pt.blend = std::vector<uint8_t>();
@@ -611,6 +620,17 @@ void restore_vb() {
     g_vbBinds.clear();
 }
 
+void permute_xyz(const float* s, int perm, float* d) {
+    switch (perm) {
+        case 1: d[0]=s[1]; d[1]=s[0]; d[2]=s[2]; break;
+        case 2: d[0]=s[1]; d[1]=s[2]; d[2]=s[0]; break;
+        case 3: d[0]=s[2]; d[1]=s[1]; d[2]=s[0]; break;
+        case 4: d[0]=s[2]; d[1]=s[0]; d[2]=s[1]; break;
+        case 5: d[0]=s[0]; d[1]=s[2]; d[2]=s[1]; break;
+        default: d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; break;
+    }
+}
+
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basev = 0) {
     c_draw++;
     GLuint eb = cur_elem();
@@ -747,6 +767,80 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("  a%d sz=%d ty=%x st=%d ptr=%p buf=%u |%s",
                      i, la[i].size, la[i].type, la[i].stride, la[i].ptr, la[i].buf, line.c_str());
             }
+            continue;
+        }
+        if (pt.action == 12) {
+            LiveAttr la[16];
+            capture_vao(la);
+            int pos = -1;
+            for (int i = 0; i < 16; i++) {
+                if (la[i].enabled && la[i].size >= 3 && la[i].type == GL_FLOAT) { pos = i; break; }
+            }
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if ((uint32_t)ip[k] + 1u > vcount) vcount = (uint32_t)ip[k] + 1u;
+            }
+            if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
+            const LiveAttr& a = la[pos];
+            if (!a.buf || a.stride <= 0) continue;
+            const size_t off = (size_t)(uintptr_t)a.ptr;
+            const size_t want = off + (size_t)vcount * (size_t)a.stride;
+            if (want > (16u << 20)) continue;
+            GLuint savedArr = g_curArray;
+            o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+            void* mp = o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT);
+            if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+            std::vector<uint8_t> cur((const uint8_t*)mp, (const uint8_t*)mp + want);
+            if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+            o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+
+            const size_t srcN = pt.ib.size() / 40;
+            const size_t n = std::min((size_t)vcount, srcN);
+            if (!pt.dynReady || pt.dynSrcBuf != a.buf || pt.dynStride != a.stride ||
+                pt.dynOffset != off || pt.dynCount != vcount) {
+                pt.dynReady = true;
+                pt.dynPosAttr = pos;
+                pt.dynSrcBuf = a.buf;
+                pt.dynStride = a.stride;
+                pt.dynOffset = off;
+                pt.dynCount = vcount;
+                pt.dynRef.assign((size_t)vcount * 3, 0.0f);
+                pt.dynBuf = cur;
+                for (size_t v = 0; v < n; v++) {
+                    const float* now = (const float*)(cur.data() + off + v * (size_t)a.stride);
+                    float* ref = pt.dynRef.data() + v * 3;
+                    ref[0] = now[0]; ref[1] = now[1]; ref[2] = now[2];
+                    const float* src = (const float*)(pt.ib.data() + v * 40);
+                    float mod[3]; permute_xyz(src, pt.perm, mod);
+                    float* dst = (float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
+                    dst[0] = mod[0]; dst[1] = mod[1]; dst[2] = mod[2];
+                }
+                o_glGenBuffers(1, &pt.glBuf);
+                o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
+                o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)pt.dynBuf.size(), pt.dynBuf.data(), GL_DYNAMIC_DRAW);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                LOGI("vbmoddyn init attr=%d verts=%u stride=%d perm=%d buf=%u", pos, vcount, a.stride, pt.perm, pt.glBuf);
+            } else {
+                for (size_t v = 0; v < n; v++) {
+                    const float* now = (const float*)(cur.data() + off + v * (size_t)a.stride);
+                    const float* ref = pt.dynRef.data() + v * 3;
+                    const float* src = (const float*)(pt.ib.data() + v * 40);
+                    float mod[3]; permute_xyz(src, pt.perm, mod);
+                    float* dst = (float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
+                    dst[0] = mod[0] + (now[0] - ref[0]);
+                    dst[1] = mod[1] + (now[1] - ref[1]);
+                    dst[2] = mod[2] + (now[2] - ref[2]);
+                }
+                if (o_glBufferSubData) {
+                    o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
+                    o_glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)pt.dynBuf.size(), pt.dynBuf.data());
+                    o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                }
+            }
+            g_vbBinds.clear();
+            { VbBind vb; vb.idx = pt.dynPosAttr; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
             continue;
         }
         if (pt.action == 10) {
