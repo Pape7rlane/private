@@ -760,11 +760,15 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             for (int i = 0; i < 16; i++) {
                 if (!la[i].enabled) continue;
                 if (la[i].size == 3 && la[i].type == GL_FLOAT && iPos < 0) iPos = i;
-                else if (la[i].size == 4 && la[i].type == GL_BYTE) { if (iNrm < 0) iNrm = i; else if (iTan < 0) iTan = i; }
-                else if (la[i].size == 4 && la[i].type == GL_UNSIGNED_BYTE && iBld < 0) iBld = i;
-                else if (la[i].size == 2 && la[i].type == GL_FLOAT) { if (iUv0 < 0) iUv0 = i; else if (iUv1 < 0) iUv1 = i; }
+                else if (la[i].size == 4 && (la[i].type == GL_BYTE || la[i].type == GL_UNSIGNED_BYTE)) {
+                    if (iNrm < 0) iNrm = i; else if (iTan < 0) iTan = i;
+                } else if (la[i].size == 2 && la[i].type == GL_FLOAT) {
+                    if (iUv0 < 0) iUv0 = i; else if (iUv1 < 0) iUv1 = i;
+                }
             }
-            LOGI("vbmod attrs pos=%d nrm=%d tan=%d bld=%d uv0=%d uv1=%d vcount=%u", iPos, iNrm, iTan, iBld, iUv0, iUv1, vcount);
+            LOGI("vbmod attrs pos=%d nrm=%d tan=%d uv0=%d uv1=%d vcount=%u", iPos, iNrm, iTan, iUv0, iUv1, vcount);
+            // 只处理主渲染 pass（有 UV 的），阴影/深度 pass 保持原样
+            if (iPos < 0 || iUv0 < 0) { pt.done = false; continue; }
 
             // 按缓冲分组
             std::map<GLuint, std::vector<int>> groups;
@@ -844,13 +848,6 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                             d[3] = (int8_t)(f[3] < 0.f ? -127 : 127);
                         }
                         LOGI("vbmod tan: %zu verts", nUse);
-                    } else if (i == iBld) {
-                        size_t nb = std::min(nUse, nBld);
-                        for (size_t v = 0; v < nb; v++) {
-                            if ((size_t)st < off + 4) break;
-                            memcpy(buf.data() + v * (size_t)st + off, pt.blend.data() + v * 32 + 16, 4);
-                        }
-                        LOGI("vbmod bld: %zu verts", nb);
                     } else if (i == iUv0 || i == iUv1) {
                         if (!nTex) continue;
                         size_t base = (i == iUv0) ? 0 : 8;
