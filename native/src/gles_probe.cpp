@@ -324,6 +324,8 @@ struct Patch {
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
     // vbmod: 全属性替换
+    int         perm = 0;
+    float       scale = 1.0f;
     std::vector<uint8_t> blend, tex;
     std::vector<std::pair<int,GLuint>> binds;
 };
@@ -413,6 +415,8 @@ void load_patches() {
                 LOGI("vbmod src %s %ld bytes", srcs[q].path.c_str(), sz);
             }
             if (!okall) continue;
+            if (n >= 6) pt.perm = (int)strtoul(a5, nullptr, 0);
+            LOGI("vbmod perm=%d", pt.perm);
         } else if (!strcmp(cmd, "vbbox")) {
             // vbbox <ibhash> [first]  — 打印该 draw 的 attr0 包围盒
             if (n < 2) continue;
@@ -794,13 +798,27 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     if (i == iPos) {
                         for (size_t v = 0; v < nUse; v++) {
                             if ((size_t)st < off + 12) break;
-                            memcpy(buf.data() + v * (size_t)st + off, pt.ib.data() + v * 40, 12);
+                            const float* src = (const float*)(pt.ib.data() + v * 40);
+                            float* dst = (float*)(buf.data() + v * (size_t)st + off);
+                            switch (pt.perm) {
+                                case 1: dst[0]=src[1]; dst[1]=src[0]; dst[2]=src[2]; break;
+                                case 2: dst[0]=src[1]; dst[1]=src[2]; dst[2]=src[0]; break;
+                                case 3: dst[0]=src[2]; dst[1]=src[1]; dst[2]=src[0]; break;
+                                case 4: dst[0]=src[2]; dst[1]=src[0]; dst[2]=src[1]; break;
+                                case 5: dst[0]=src[0]; dst[1]=src[2]; dst[2]=src[1]; break;
+                                default: dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2]; break;
+                            }
                         }
-                        LOGI("vbmod pos: %zu verts", nUse);
+                        LOGI("vbmod pos: %zu verts perm=%d", nUse, pt.perm);
                     } else if (i == iNrm) {
                         for (size_t v = 0; v < nUse; v++) {
                             if ((size_t)st < off + 4) break;
-                            const float* f = (const float*)(pt.ib.data() + v * 40 + 12);
+                            const float* f0 = (const float*)(pt.ib.data() + v * 40 + 12);
+                            float f[3] = {f0[0], f0[1], f0[2]};
+                            if (pt.perm == 1 || pt.perm == 2) { f[0]=f0[1]; f[1]=f0[0]; f[2]=f0[2]; }
+                            else if (pt.perm == 3) { f[0]=f0[2]; f[1]=f0[1]; f[2]=f0[0]; }
+                            else if (pt.perm == 4) { f[0]=f0[2]; f[1]=f0[0]; f[2]=f0[1]; }
+                            else if (pt.perm == 5) { f[0]=f0[0]; f[1]=f0[2]; f[2]=f0[1]; }
                             int8_t* d = (int8_t*)(buf.data() + v * (size_t)st + off);
                             for (int c = 0; c < 3; c++) {
                                 float t = f[c] * 127.0f;
@@ -812,7 +830,12 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     } else if (i == iTan) {
                         for (size_t v = 0; v < nUse; v++) {
                             if ((size_t)st < off + 4) break;
-                            const float* f = (const float*)(pt.ib.data() + v * 40 + 24);
+                            const float* f0 = (const float*)(pt.ib.data() + v * 40 + 24);
+                            float f[4] = {f0[0], f0[1], f0[2], f0[3]};
+                            if (pt.perm == 1 || pt.perm == 2) { f[0]=f0[1]; f[1]=f0[0]; f[2]=f0[2]; }
+                            else if (pt.perm == 3) { f[0]=f0[2]; f[1]=f0[1]; f[2]=f0[0]; }
+                            else if (pt.perm == 4) { f[0]=f0[2]; f[1]=f0[0]; f[2]=f0[1]; }
+                            else if (pt.perm == 5) { f[0]=f0[0]; f[1]=f0[2]; f[2]=f0[1]; }
                             int8_t* d = (int8_t*)(buf.data() + v * (size_t)st + off);
                             for (int c = 0; c < 3; c++) {
                                 float t = f[c] * 127.0f;
