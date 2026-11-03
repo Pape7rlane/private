@@ -652,7 +652,7 @@ void install_hooks() {
 
 // ---------------------------------------------------------------- 入口
 
-extern "C" void il2cpp_probe_start();
+void il2cpp_probe_start();
 
 __attribute__((constructor)) static void probe_on_load() {
     init_pkg();
