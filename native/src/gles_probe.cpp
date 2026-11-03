@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -322,6 +323,9 @@ struct Patch {
     // vbpos 替换
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
+    // vbmod: 全属性替换
+    std::vector<uint8_t> blend, tex;
+    std::vector<std::pair<int,GLuint>> binds;
 };
 
 std::vector<Patch> g_patches;
@@ -383,6 +387,28 @@ void load_patches() {
             LOGI("patch vbscale3 hash=%08llx attr=%u f=(%.2f %.2f %.2f)",
                  (unsigned long long)pt.hash, pt.attrIdx, pt.factor, pt.fy, pt.fz);
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
+        } else if (!strcmp(cmd, "vbmod")) {
+            // vbmod <ibhash> <posfile> <blendfile> <texfile>
+            if (n < 5) continue;
+            pt.action = 10;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+            pt.blend = std::vector<uint8_t>();
+            struct { std::string path; std::vector<uint8_t>* dst; } srcs[3] = {
+                {a2, &pt.ib}, {a3, &pt.blend}, {a4, &pt.tex}};
+            bool okall = true;
+            for (int q = 0; q < 3; q++) {
+                std::string fp = std::string(g_dir) + "/" + srcs[q].path;
+                FILE* vf = fopen(fp.c_str(), "rb");
+                if (!vf) { LOGE("cannot open %s", fp.c_str()); okall = false; break; }
+                fseek(vf, 0, SEEK_END); long sz = ftell(vf); fseek(vf, 0, SEEK_SET);
+                if (sz <= 0 || sz > (64 << 20)) { fclose(vf); okall = false; break; }
+                srcs[q].dst->resize((size_t)sz);
+                if (fread(srcs[q].dst->data(), 1, (size_t)sz, vf) != (size_t)sz) { fclose(vf); okall = false; break; }
+                fclose(vf);
+                LOGI("vbmod src %s %ld bytes", srcs[q].path.c_str(), sz);
+            }
+            if (!okall) continue;
         } else if (!strcmp(cmd, "vbbox")) {
             // vbbox <ibhash> [first]  — 打印该 draw 的 attr0 包围盒
             if (n < 2) continue;
@@ -496,70 +522,44 @@ GLuint g_overrideBuf = 0;
 GLsizei g_overrideCount = 0;
 GLenum g_overrideType = GL_UNSIGNED_SHORT;
 
-// 顶点属性临时重绑
-int    g_vbAttr = -1;
-GLuint g_vbBuf  = 0;
-Attr   g_vbSaved;
-GLuint g_vbSavedArr = 0;
-
-struct LiveAttr { bool enabled=false; GLint size=0; GLenum type=0; GLsizei stride=0;
-                  GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
-
-void capture_vao(LiveAttr out[16]) {
-    typedef void (*PFNGETIV)(GLuint, GLenum, GLint*);
-    typedef void (*PFNGETPTR)(GLuint, GLenum, void**);
-    static PFNGETIV  pGetIv  = nullptr;
-    static PFNGETPTR pGetPtr = nullptr;
-    if (!pGetIv)  pGetIv  = (PFNGETIV)gl_real("glGetVertexAttribiv");
-    if (!pGetPtr) pGetPtr = (PFNGETPTR)gl_real("glGetVertexAttribPointerv");
-    for (int i = 0; i < 16; i++) { out[i] = LiveAttr(); if (!pGetIv || !pGetPtr) continue; }
-    if (!pGetIv || !pGetPtr) return;
-    for (int i = 0; i < 16; i++) {
-        GLint en = 0, sz = 0, ty = 0, st = 0, nm = 0, bd = 0;
-        void* pt = nullptr;
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
-        if (!en) continue;
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &sz);
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &ty);
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &st);
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &nm);
-        pGetIv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &bd);
-        pGetPtr((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &pt);
-        out[i].enabled = true; out[i].size = sz; out[i].type = (GLenum)ty;
-        out[i].stride = st; out[i].norm = (GLboolean)nm;
-        out[i].buf = (GLuint)bd; out[i].ptr = pt;
-    }
-}
+// 顶点属性临时重绑（支持多个属性）
+struct VbBind { int idx = -1; GLuint newBuf = 0; Attr saved; };
+std::vector<VbBind> g_vbBinds;
+GLuint g_vbSavedArray = 0;
 
 void apply_vb() {
-    if (g_vbAttr < 0 || !g_vbBuf || !o_glBindBuffer || !o_glVertexAttribPointer) return;
+    if (g_vbBinds.empty() || !o_glBindBuffer || !o_glVertexAttribPointer) return;
     LiveAttr la[16];
     capture_vao(la);
-    if (g_vbAttr >= 16 || !la[g_vbAttr].enabled) { g_vbAttr = -1; return; }
-    g_vbSaved.has = true;
-    g_vbSaved.size = la[g_vbAttr].size;
-    g_vbSaved.type = la[g_vbAttr].type;
-    g_vbSaved.stride = la[g_vbAttr].stride;
-    g_vbSaved.buf = la[g_vbAttr].buf;
-    g_vbSaved.ptr = la[g_vbAttr].ptr;
-    g_vbSaved.norm = la[g_vbAttr].norm;
-    g_vbSavedArr = g_curArray;
-    o_glBindBuffer(GL_ARRAY_BUFFER, g_vbBuf);
-    o_glVertexAttribPointer((GLuint)g_vbAttr, g_vbSaved.size, g_vbSaved.type, g_vbSaved.norm,
-                            g_vbSaved.stride, g_vbSaved.ptr);
-    g_curArray = g_vbBuf;
+    g_vbSavedArray = g_curArray;
+    for (auto& b : g_vbBinds) {
+        if (b.idx < 0 || b.idx >= 16 || !la[b.idx].enabled) continue;
+        b.saved.has = true;
+        b.saved.size = la[b.idx].size;
+        b.saved.type = la[b.idx].type;
+        b.saved.stride = la[b.idx].stride;
+        b.saved.buf = la[b.idx].buf;
+        b.saved.ptr = la[b.idx].ptr;
+        b.saved.norm = la[b.idx].norm;
+        o_glBindBuffer(GL_ARRAY_BUFFER, b.newBuf);
+        o_glVertexAttribPointer((GLuint)b.idx, b.saved.size, b.saved.type, b.saved.norm,
+                                b.saved.stride, b.saved.ptr);
+    }
+    g_curArray = g_vbBinds.empty() ? g_vbSavedArray : g_vbBinds.back().newBuf;
 }
 
 void restore_vb() {
-    if (g_vbAttr < 0) return;
+    if (g_vbBinds.empty()) return;
     if (o_glBindBuffer && o_glVertexAttribPointer) {
-        o_glBindBuffer(GL_ARRAY_BUFFER, g_vbSaved.buf);
-        o_glVertexAttribPointer((GLuint)g_vbAttr, g_vbSaved.size, g_vbSaved.type, g_vbSaved.norm,
-                                g_vbSaved.stride, g_vbSaved.ptr);
-        o_glBindBuffer(GL_ARRAY_BUFFER, g_vbSavedArr);
+        for (auto& b : g_vbBinds) {
+            if (b.idx < 0 || !b.saved.has) continue;
+            o_glBindBuffer(GL_ARRAY_BUFFER, b.saved.buf);
+            o_glVertexAttribPointer((GLuint)b.idx, b.saved.size, b.saved.type, b.saved.norm,
+                                    b.saved.stride, b.saved.ptr);
+        }
     }
-    g_curArray = g_vbSavedArr;
-    g_vbAttr = -1;
+    g_curArray = g_vbSavedArray;
+    g_vbBinds.clear();
 }
 
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basev = 0) {
@@ -646,8 +646,128 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.glBuf = nb;
                 LOGI("vbscale: attr%u verts=%u stride=%d -> buf %u", pt.attrIdx, vcount, a.stride, nb);
             }
-            g_vbAttr = (int)pt.attrIdx;
-            g_vbBuf = pt.glBuf;
+            g_vbBinds.clear();
+            { VbBind vb; vb.idx = (int)pt.attrIdx; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+            continue;
+        }
+        if (pt.action == 10) {
+            if (pt.done) {
+                g_vbBinds.clear();
+                for (auto& pr : pt.binds) { VbBind vb; vb.idx = pr.first; vb.newBuf = pr.second; g_vbBinds.push_back(vb); }
+                continue;
+            }
+            pt.done = true;
+            if (pt.ib.empty() || pt.blend.empty()) continue;
+            LiveAttr la[16];
+            capture_vao(la);
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if (ip[k] + 1u > vcount) vcount = ip[k] + 1u;
+            }
+            if (!vcount) continue;
+
+            // 分类属性
+            int iPos = -1, iNrm = -1, iTan = -1, iBld = -1, iUv0 = -1, iUv1 = -1;
+            for (int i = 0; i < 16; i++) {
+                if (!la[i].enabled) continue;
+                if (la[i].size == 3 && la[i].type == GL_FLOAT && iPos < 0) iPos = i;
+                else if (la[i].size == 4 && la[i].type == GL_BYTE) { if (iNrm < 0) iNrm = i; else if (iTan < 0) iTan = i; }
+                else if (la[i].size == 4 && la[i].type == GL_UNSIGNED_BYTE && iBld < 0) iBld = i;
+                else if (la[i].size == 2 && la[i].type == GL_FLOAT) { if (iUv0 < 0) iUv0 = i; else if (iUv1 < 0) iUv1 = i; }
+            }
+            LOGI("vbmod attrs pos=%d nrm=%d tan=%d bld=%d uv0=%d uv1=%d vcount=%u", iPos, iNrm, iTan, iBld, iUv0, iUv1, vcount);
+
+            // 按缓冲分组
+            std::map<GLuint, std::vector<int>> groups;
+            for (int i = 0; i < 16; i++) if (la[i].enabled && la[i].buf) groups[la[i].buf].push_back(i);
+
+            const size_t nPos = pt.ib.size() / 40;
+            const size_t nBld = pt.blend.size() / 32;
+            const size_t nTex = pt.tex.empty() ? 0 : pt.tex.size() / 20;
+            const size_t nUse = std::min((size_t)vcount, nPos);
+            pt.binds.clear();
+
+            for (auto& g : groups) {
+                GLsizei maxStride = 0;
+                for (int i : g.second) maxStride = std::max(maxStride, la[i].stride);
+                if (maxStride <= 0) continue;
+                size_t want = (size_t)vcount * (size_t)maxStride;
+                if (want > (16u << 20)) continue;
+                GLuint savedArr = g_curArray;
+                o_glBindBuffer(GL_ARRAY_BUFFER, g.first);
+                void* mp = o_glMapBufferRange
+                               ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT)
+                               : nullptr;
+                if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); LOGW("vbmod map fail buf %u", g.first); continue; }
+                std::vector<uint8_t> buf((const uint8_t*)mp, (const uint8_t*)mp + want);
+                if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+
+                for (int i : g.second) {
+                    const GLsizei st = la[i].stride;
+                    const size_t off = (size_t)(uintptr_t)la[i].ptr;
+                    if (i == iPos) {
+                        for (size_t v = 0; v < nUse; v++) {
+                            if ((size_t)st < off + 12) break;
+                            memcpy(buf.data() + v * (size_t)st + off, pt.ib.data() + v * 40, 12);
+                        }
+                        LOGI("vbmod pos: %zu verts", nUse);
+                    } else if (i == iNrm) {
+                        for (size_t v = 0; v < nUse; v++) {
+                            if ((size_t)st < off + 4) break;
+                            const float* f = (const float*)(pt.ib.data() + v * 40 + 12);
+                            int8_t* d = (int8_t*)(buf.data() + v * (size_t)st + off);
+                            for (int c = 0; c < 3; c++) {
+                                float t = f[c] * 127.0f;
+                                d[c] = (int8_t)(t > 127.f ? 127 : (t < -127.f ? -127 : (int)lrintf(t)));
+                            }
+                            d[3] = 0;
+                        }
+                        LOGI("vbmod nrm: %zu verts", nUse);
+                    } else if (i == iTan) {
+                        for (size_t v = 0; v < nUse; v++) {
+                            if ((size_t)st < off + 4) break;
+                            const float* f = (const float*)(pt.ib.data() + v * 40 + 24);
+                            int8_t* d = (int8_t*)(buf.data() + v * (size_t)st + off);
+                            for (int c = 0; c < 3; c++) {
+                                float t = f[c] * 127.0f;
+                                d[c] = (int8_t)(t > 127.f ? 127 : (t < -127.f ? -127 : (int)lrintf(t)));
+                            }
+                            d[3] = (int8_t)(f[3] < 0.f ? -127 : 127);
+                        }
+                        LOGI("vbmod tan: %zu verts", nUse);
+                    } else if (i == iBld) {
+                        size_t nb = std::min(nUse, nBld);
+                        for (size_t v = 0; v < nb; v++) {
+                            if ((size_t)st < off + 4) break;
+                            memcpy(buf.data() + v * (size_t)st + off, pt.blend.data() + v * 32 + 16, 4);
+                        }
+                        LOGI("vbmod bld: %zu verts", nb);
+                    } else if (i == iUv0 || i == iUv1) {
+                        if (!nTex) continue;
+                        size_t base = (i == iUv0) ? 0 : 8;
+                        size_t nt = std::min(nUse, nTex);
+                        for (size_t v = 0; v < nt; v++) {
+                            if ((size_t)st < off + 8) break;
+                            memcpy(buf.data() + v * (size_t)st + off, pt.tex.data() + v * 20 + base, 8);
+                        }
+                        LOGI("vbmod uv%d: %zu verts", i == iUv0 ? 0 : 1, nt);
+                    }
+                }
+
+                GLuint nb = 0;
+                o_glGenBuffers(1, &nb);
+                o_glBindBuffer(GL_ARRAY_BUFFER, nb);
+                o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)buf.size(), buf.data(), GL_STATIC_DRAW);
+                o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+                for (int i : g.second) pt.binds.push_back({i, nb});
+                LOGI("vbmod buf %u -> %u (%zu bytes, %zu attrs)", g.first, nb, buf.size(), g.second.size());
+            }
+
+            g_vbBinds.clear();
+            for (auto& pr : pt.binds) { VbBind vb; vb.idx = pr.first; vb.newBuf = pr.second; g_vbBinds.push_back(vb); }
             continue;
         }
         if (pt.action == 9) {
@@ -741,8 +861,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("vbpos: attr%u verts=%u/%zu stride=%d copy=%zu -> buf %u",
                      pt.attrIdx, vcount, n, a.stride, copy, nb);
             }
-            g_vbAttr = (int)pt.attrIdx;
-            g_vbBuf = pt.glBuf;
+            g_vbBinds.clear();
+            { VbBind vb; vb.idx = (int)pt.attrIdx; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
             continue;
         }
         if (pt.action == 5) {
