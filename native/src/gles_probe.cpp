@@ -301,6 +301,12 @@ void load_patches() {
             if (n >= 4) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a3, nullptr, 0); }
             if (n >= 5) pt.drawCount = (uint32_t)strtoul(a4, nullptr, 0);
             if (n >= 6) pt.ibType = strstr(a5, "32") ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+        } else if (!strcmp(cmd, "dumpmesh")) {
+            if (n < 3) continue;
+            pt.action = 6;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+            if (n >= 4) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a3, nullptr, 0); }
         } else if (!strcmp(cmd, "dump") || !strcmp(cmd, "dumpvb")) {
             if (n < 3) continue;
             pt.action = (cmd[4] == 'v') ? 2 : 1;
@@ -453,6 +459,34 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("dumped ib %s (%zu bytes)", path.c_str(), it->second.data.size());
                 pt.done = true;
             }
+        } else if (pt.action == 6) {
+            auto vit = g_vaos.find(g_curVao);
+            if (vit == g_vaos.end()) continue;
+            std::string base = std::string(g_dir) + "/" + pt.file;
+            std::string meta = base + ".txt";
+            FILE* mf = fopen(meta.c_str(), "w");
+            if (!mf) continue;
+            fprintf(mf, "ib_hash=%08llx first=%u count=%u type=%x vao=%u\n",
+                    (unsigned long long)wh1, first, (unsigned)count, type, g_curVao);
+            for (int i = 0; i < 16; i++) {
+                const Attr& a = vit->second.attr[i];
+                if (!a.has) continue;
+                auto bit = g_bufs.find(a.buf);
+                size_t bsz = (bit == g_bufs.end()) ? 0 : bit->second.data.size();
+                fprintf(mf, "attr%d size=%d type=%x stride=%d buf=%u bytes=%zu\n",
+                        i, a.size, a.type, a.stride, a.buf, bsz);
+                if (bit == g_bufs.end() || bit->second.data.empty()) continue;
+                char fn[256];
+                snprintf(fn, sizeof fn, "%s.a%d.bin", base.c_str(), i);
+                FILE* bf = fopen(fn, "wb");
+                if (bf) {
+                    fwrite(bit->second.data.data(), 1, bit->second.data.size(), bf);
+                    fclose(bf);
+                }
+            }
+            fclose(mf);
+            LOGI("dumped mesh %s", base.c_str());
+            pt.done = true;
         } else if (pt.action == 2) {
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end() || !vit->second.attr[0].has) continue;
