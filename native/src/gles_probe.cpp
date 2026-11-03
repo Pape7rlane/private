@@ -48,8 +48,9 @@ struct BufInfo {
 
 // 索引缓冲副本预算
 size_t g_dataBytes = 0;
-const size_t kDataBudget = 128u << 20;
-const size_t kDataPerBuf = 8u << 20;
+// 只缓存小缓冲: 角色网格一定在里面, 环境大缓冲直接跳过
+const size_t kDataBudget  = 256u << 20;
+const size_t kDataPerBuf  = 1u << 20;
 
 std::unordered_map<GLuint, BufInfo>  g_bufs;
 std::unordered_map<GLuint, VaoState> g_vaos;
@@ -157,7 +158,7 @@ void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
     b.h_ib = buffer_hash(p, (size_t)size, 2u);
     b.h_vb = buffer_hash(p, (size_t)size, 1u);
 
-    // 索引缓冲用于子段哈希, 顶点缓冲用于导出位置
+    // 索引缓冲用于哈希, 顶点缓冲用于导出; 超过 1MB 的一律不存
     if ((size_t)size > kDataPerBuf || g_dataBytes + (size_t)size > kDataBudget) {
         b.data.clear();
         return;
