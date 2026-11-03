@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <algorithm>
@@ -56,7 +57,7 @@ std::unordered_map<GLuint, VaoState> g_vaos;
 GLuint g_curVao = 0, g_curArray = 0, g_curProg = 0;
 
 std::atomic<uint64_t> c_egl{0}, c_dlsym{0}, c_draw{0}, c_bindBuf{0},
-                      c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0};
+                      c_useProg{0}, c_attrib{0}, c_bufData{0}, c_vao{0}, c_genBuf{0}, c_skipped{0};
 
 uint64_t g_unique = 0;
 std::unordered_set<uint64_t> g_seen;
@@ -225,6 +226,43 @@ std::string layout_of(GLuint vao) {
     return s;
 }
 
+// ---------------------------------------------------------------- patch
+
+struct Patch {
+    uint64_t    hash = 0;
+    int         action = 0;   // 0=skip, 1=dump
+    std::string file;
+};
+
+std::vector<Patch> g_patches;
+bool g_patchesLoaded = false;
+
+void load_patches() {
+    if (g_patchesLoaded) return;
+    g_patchesLoaded = true;
+    if (!g_dir[0]) return;
+    std::string p = std::string(g_dir) + "/patch.txt";
+    FILE* f = fopen(p.c_str(), "r");
+    if (!f) { LOGI("no patch.txt"); return; }
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char* s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '#' || *s == '\n' || *s == 0) continue;
+        char cmd[32] = {0}, hx[64] = {0}, fn[256] = {0};
+        if (sscanf(s, "%31s %63s %255s", cmd, hx, fn) < 2) continue;
+        Patch pt;
+        pt.hash = strtoull(hx, nullptr, 16);
+        if (!strcmp(cmd, "skip")) pt.action = 0;
+        else if (!strcmp(cmd, "dump")) { pt.action = 1; pt.file = fn; }
+        else { LOGW("unknown patch cmd %s", cmd); continue; }
+        g_patches.push_back(pt);
+        LOGI("patch: %s %016llx %s", cmd, (unsigned long long)pt.hash, pt.file.c_str());
+    }
+    fclose(f);
+    LOGI("patches loaded: %zu", g_patches.size());
+}
+
 // 一次 draw 的指纹: 整个 IB 的 hash + match_first_index + 索引数
 struct Key {
     uint64_t wh1;
@@ -270,7 +308,7 @@ void dump_stats() {
     fflush(g_fp);
 }
 
-void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
+bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
     GLuint eb = cur_elem();
     const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
@@ -301,10 +339,29 @@ void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
         }
     }
 
+    bool skip = false;
+    load_patches();
+    if (!g_patches.empty() && wh1) {
+        for (const auto& pt : g_patches) {
+            if (pt.hash != wh1) continue;
+            if (pt.action == 0) { c_skipped++; skip = true; }
+            if (pt.action == 1 && it != g_bufs.end() && !it->second.data.empty()) {
+                std::string path = std::string(g_dir) + "/" + pt.file;
+                FILE* f = fopen(path.c_str(), "wb");
+                if (f) {
+                    fwrite(it->second.data.data(), 1, it->second.data.size(), f);
+                    fclose(f);
+                    LOGI("dumped %s (%zu bytes)", path.c_str(), it->second.data.size());
+                }
+                break;
+            }
+        }
+    }
+
     Key k{wh1, first, (uint32_t)count};
     auto it2 = g_recs.find(k);
     if (it2 == g_recs.end()) {
-        if (g_recs.size() >= 60000) return;
+        if (g_recs.size() >= 60000) return false;
         Rec r;
         r.vao = g_curVao; r.eb = eb; r.prog = g_curProg;
         r.type = type; r.mode = mode;
@@ -330,23 +387,22 @@ void on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
              (unsigned long long)c_bindBuf.load(), (unsigned long long)c_vao.load(),
              (unsigned long long)c_genBuf.load(), (unsigned long long)c_bufData.load(),
              (unsigned long long)c_useProg.load(), (unsigned long long)c_attrib.load());
+        if (c_skipped) LOGI("skipped=%llu", (unsigned long long)c_skipped.load());
     }
+    return skip;
 }
 
 void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawElements, "glDrawElements");
-    on_draw("", mode, count, type, indices);
-    o_glDrawElements(mode, count, type, indices);
+    if (!on_draw("", mode, count, type, indices)) o_glDrawElements(mode, count, type, indices);
 }
 void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei n) {
     RESOLVE(o_glDrawElementsInstanced, "glDrawElementsInstanced");
-    on_draw("I", mode, count, type, indices);
-    o_glDrawElementsInstanced(mode, count, type, indices, n);
+    if (!on_draw("I", mode, count, type, indices)) o_glDrawElementsInstanced(mode, count, type, indices, n);
 }
 void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices) {
     RESOLVE(o_glDrawRangeElements, "glDrawRangeElements");
-    on_draw("R", mode, count, type, indices);
-    o_glDrawRangeElements(mode, start, end, count, type, indices);
+    if (!on_draw("R", mode, count, type, indices)) o_glDrawRangeElements(mode, start, end, count, type, indices);
 }
 
 // ---------------------------------------------------------------- 表
