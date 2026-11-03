@@ -308,7 +308,7 @@ struct Patch {
     bool        done = false;
     uint32_t    hits = 0;
     uint32_t    attrIdx = 0;
-    float       factor = 1.0f;
+    float       factor = 1.0f, fy = -1.0f, fz = -1.0f;
     // ib 替换
     std::vector<uint8_t> ib;
     GLuint      glBuf = 0;
@@ -374,7 +374,10 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.attrIdx = (uint32_t)strtoul(a2, nullptr, 0);
             pt.factor = (float)atof(a3);
-            if (n >= 5) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a4, nullptr, 0); }
+            if (n >= 5) pt.fy = (float)atof(a4);
+            if (n >= 6) pt.fz = (float)atof(a5);
+            LOGI("patch vbscale3 hash=%08llx attr=%u f=(%.2f %.2f %.2f)",
+                 (unsigned long long)pt.hash, pt.attrIdx, pt.factor, pt.fy, pt.fz);
             LOGI("patch vbscale hash=%08llx attr=%u factor=%.2f", (unsigned long long)pt.hash, pt.attrIdx, pt.factor);
         } else if (!strcmp(cmd, "vbbox")) {
             // vbbox <ibhash> [first]  — 打印该 draw 的 attr0 包围盒
@@ -583,9 +586,11 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
 
                 size_t off = (size_t)(uintptr_t)a.ptr, vs = (size_t)a.stride;
+                float fa[4] = {pt.factor, pt.fy, pt.fz, pt.factor};
+                if (pt.fy < 0) { fa[1] = pt.factor; fa[2] = pt.factor; }
                 for (size_t k = 0; k + off + 4 * (size_t)a.size <= buf.size(); k += vs) {
                     float* f = (float*)(buf.data() + k + off);
-                    for (int c = 0; c < a.size; c++) f[c] *= pt.factor;
+                    for (int c = 0; c < a.size; c++) f[c] *= fa[c];
                 }
                 GLuint nb = 0;
                 o_glGenBuffers(1, &nb);
@@ -726,6 +731,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         } else if (pt.action == 6) {
             // 只抓一次: 打印完整布局 + 每个属性流原始字节
             if (pt.done) continue;
+            if (pt.hits++ < 3000) continue;
             pt.done = true;
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end()) continue;
