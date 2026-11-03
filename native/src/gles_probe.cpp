@@ -256,6 +256,8 @@ struct Patch {
     std::vector<uint8_t> ib;
     GLuint      glBuf = 0;
     uint32_t    ibCount = 0;
+    GLenum      ibType = GL_UNSIGNED_SHORT;
+    uint32_t    drawCount = 0;   // 0 = 用原始 count
 };
 
 std::vector<Patch> g_patches;
@@ -273,8 +275,8 @@ void load_patches() {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         if (*s == '#' || *s == '\n' || *s == 0) continue;
-        char cmd[32] = {0}, a1[64] = {0}, a2[64] = {0}, a3[256] = {0};
-        int n = sscanf(s, "%31s %63s %63s %255s", cmd, a1, a2, a3);
+        char cmd[32] = {0}, a1[64] = {0}, a2[64] = {0}, a3[64] = {0}, a4[64] = {0}, a5[64] = {0};
+        int n = sscanf(s, "%31s %63s %63s %63s %63s %63s", cmd, a1, a2, a3, a4, a5);
         if (n < 1) continue;
         Patch pt;
         if (!strcmp(cmd, "skipall")) {
@@ -295,7 +297,10 @@ void load_patches() {
             pt.action = 5;
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
+            // ib <hash> <file> [first] [count] [u16|u32]
             if (n >= 4) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a3, nullptr, 0); }
+            if (n >= 5) pt.drawCount = (uint32_t)strtoul(a4, nullptr, 0);
+            if (n >= 6) pt.ibType = strstr(a5, "32") ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
         } else if (!strcmp(cmd, "dump") || !strcmp(cmd, "dumpvb")) {
             if (n < 3) continue;
             pt.action = (cmd[4] == 'v') ? 2 : 1;
@@ -313,8 +318,10 @@ void load_patches() {
             pt.ib.resize((size_t)sz);
             if (fread(pt.ib.data(), 1, (size_t)sz, ibf) != (size_t)sz) { fclose(ibf); continue; }
             fclose(ibf);
-            pt.ibCount = (uint32_t)(sz / 2);
-            LOGI("patch ib: %s %zu bytes (%u idx)", pt.file.c_str(), pt.ib.size(), pt.ibCount);
+            pt.ibCount = (uint32_t)(sz / (pt.ibType == GL_UNSIGNED_INT ? 4 : 2));
+            if (!pt.drawCount) pt.drawCount = pt.ibCount;
+            LOGI("patch ib: %s %zu bytes (%u idx, %s)", pt.file.c_str(), pt.ib.size(), pt.ibCount,
+                 pt.ibType == GL_UNSIGNED_INT ? "u32" : "u16");
         }
         g_patches.push_back(std::move(pt));
         LOGI("patch: %s", cmd);
@@ -371,6 +378,7 @@ void dump_stats() {
 // 返回: 0=正常下发, 1=跳过, 2=用 g_overrideBuf 替换索引缓冲
 GLuint g_overrideBuf = 0;
 GLsizei g_overrideCount = 0;
+GLenum g_overrideType = GL_UNSIGNED_SHORT;
 
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices) {
     c_draw++;
@@ -426,7 +434,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             }
             if (pt.glBuf) {
                 g_overrideBuf = pt.glBuf;
-                g_overrideCount = pt.ibCount < (uint32_t)count ? pt.ibCount : (uint32_t)count;
+                g_overrideCount = (GLsizei)(pt.drawCount ? pt.drawCount : pt.ibCount);
+                g_overrideType = pt.ibType;
                 c_overridden++;
             }
             continue;
@@ -511,7 +520,7 @@ void glDrawElements_hook(GLenum mode, GLsizei count, GLenum type, const void* in
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
-        o_glDrawElements(mode, g_overrideCount, type, 0);
+        o_glDrawElements(mode, g_overrideCount, g_overrideType, 0);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
         return;
     }
@@ -524,7 +533,7 @@ void glDrawElementsInstanced_hook(GLenum mode, GLsizei count, GLenum type, const
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
-        o_glDrawElementsInstanced(mode, g_overrideCount, type, 0, n);
+        o_glDrawElementsInstanced(mode, g_overrideCount, g_overrideType, 0, n);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
         return;
     }
@@ -537,7 +546,7 @@ void glDrawRangeElements_hook(GLenum mode, GLuint start, GLuint end, GLsizei cou
     if (act == 2 && o_glBindBuffer) {
         GLuint saved = cur_elem();
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_overrideBuf);
-        o_glDrawRangeElements(mode, 0, g_overrideCount, g_overrideCount, type, 0);
+        o_glDrawRangeElements(mode, 0, g_overrideCount, g_overrideCount, g_overrideType, 0);
         o_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, saved);
         return;
     }
