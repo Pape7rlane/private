@@ -48,8 +48,8 @@ struct BufInfo {
 
 // 索引缓冲副本预算
 size_t g_dataBytes = 0;
-const size_t kDataBudget = 96u << 20;
-const size_t kDataPerBuf = 4u << 20;
+const size_t kDataBudget = 128u << 20;
+const size_t kDataPerBuf = 8u << 20;
 
 std::unordered_map<GLuint, BufInfo>  g_bufs;
 std::unordered_map<GLuint, VaoState> g_vaos;
@@ -139,8 +139,7 @@ void record_index(GLuint id, GLsizeiptr size, const void* data, GLenum target) {
     b.h1  = fnv1_32(p, (size_t)size);
     b.h1a = fnv1a_32(p, (size_t)size);
 
-    // 只有索引缓冲需要保留副本 (draw 时按子段哈希)
-    if (target != GL_ELEMENT_ARRAY_BUFFER) return;
+    // 索引缓冲用于子段哈希, 顶点缓冲用于导出位置
     if ((size_t)size > kDataPerBuf || g_dataBytes + (size_t)size > kDataBudget) {
         b.data.clear();
         return;
@@ -229,9 +228,12 @@ std::string layout_of(GLuint vao) {
 // ---------------------------------------------------------------- patch
 
 struct Patch {
-    uint64_t    hash = 0;
-    int         action = 0;   // 0=skip, 1=dump
+    uint64_t    hash  = 0;
+    int         action = 0;   // 0=skip, 1=dump ib, 2=dump vb, 3=skipall, 4=skipcnt
+    bool        hasFirst = false, hasCnt = false;
+    uint32_t    first = 0, cnt = 0;
     std::string file;
+    bool        done = false;
 };
 
 std::vector<Patch> g_patches;
@@ -249,15 +251,31 @@ void load_patches() {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         if (*s == '#' || *s == '\n' || *s == 0) continue;
-        char cmd[32] = {0}, hx[64] = {0}, fn[256] = {0};
-        if (sscanf(s, "%31s %63s %255s", cmd, hx, fn) < 2) continue;
+        char cmd[32] = {0}, a1[64] = {0}, a2[64] = {0}, a3[256] = {0};
+        int n = sscanf(s, "%31s %63s %63s %255s", cmd, a1, a2, a3);
+        if (n < 1) continue;
         Patch pt;
-        pt.hash = strtoull(hx, nullptr, 16);
-        if (!strcmp(cmd, "skip")) pt.action = 0;
-        else if (!strcmp(cmd, "dump")) { pt.action = 1; pt.file = fn; }
-        else { LOGW("unknown patch cmd %s", cmd); continue; }
+        if (!strcmp(cmd, "skipall")) {
+            pt.action = 3;
+        } else if (!strcmp(cmd, "skipcnt")) {
+            if (n < 3) continue;
+            pt.action = 4;
+            pt.first = (uint32_t)strtoul(a1, nullptr, 0);
+            pt.cnt   = (uint32_t)strtoul(a2, nullptr, 0);
+        } else if (!strcmp(cmd, "skip")) {
+            if (n < 2) continue;
+            pt.action = 0;
+            pt.hash = strtoull(a1, nullptr, 16);
+            if (n >= 3) { pt.hasFirst = true; pt.first = (uint32_t)strtoul(a2, nullptr, 0); }
+            if (n >= 4) { pt.hasCnt = true;   pt.cnt   = (uint32_t)strtoul(a3, nullptr, 0); }
+        } else if (!strcmp(cmd, "dump") || !strcmp(cmd, "dumpvb")) {
+            if (n < 3) continue;
+            pt.action = (cmd[4] == 'v') ? 2 : 1;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+        } else { LOGW("unknown patch cmd %s", cmd); continue; }
         g_patches.push_back(pt);
-        LOGI("patch: %s %016llx %s", cmd, (unsigned long long)pt.hash, pt.file.c_str());
+        LOGI("patch: %s", cmd);
     }
     fclose(f);
     LOGI("patches loaded: %zu", g_patches.size());
@@ -341,19 +359,49 @@ bool on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const vo
 
     bool skip = false;
     load_patches();
-    if (!g_patches.empty() && wh1) {
-        for (const auto& pt : g_patches) {
-            if (pt.hash != wh1) continue;
-            if (pt.action == 0) { c_skipped++; skip = true; }
-            if (pt.action == 1 && it != g_bufs.end() && !it->second.data.empty()) {
-                std::string path = std::string(g_dir) + "/" + pt.file;
-                FILE* f = fopen(path.c_str(), "wb");
-                if (f) {
-                    fwrite(it->second.data.data(), 1, it->second.data.size(), f);
-                    fclose(f);
-                    LOGI("dumped %s (%zu bytes)", path.c_str(), it->second.data.size());
-                }
-                break;
+    for (auto& pt : g_patches) {
+        if (pt.action == 3) { c_skipped++; skip = true; continue; }
+        if (pt.action == 4) {
+            if (count >= (GLsizei)pt.first && count <= (GLsizei)pt.cnt) { c_skipped++; skip = true; }
+            continue;
+        }
+        if (!wh1 || pt.hash != wh1) continue;
+        if (pt.hasFirst && first != pt.first) continue;
+        if (pt.hasCnt && (uint32_t)count != pt.cnt) continue;
+        if (pt.action == 0) { c_skipped++; skip = true; continue; }
+        if (pt.done) continue;
+
+        std::string path = std::string(g_dir) + "/" + pt.file;
+        if (pt.action == 1) {
+            if (it == g_bufs.end() || it->second.data.empty()) continue;
+            FILE* f = fopen(path.c_str(), "wb");
+            if (f) {
+                fwrite(it->second.data.data(), 1, it->second.data.size(), f);
+                fclose(f);
+                LOGI("dumped ib %s (%zu bytes)", path.c_str(), it->second.data.size());
+                pt.done = true;
+            }
+        } else if (pt.action == 2) {
+            auto vit = g_vaos.find(g_curVao);
+            if (vit == g_vaos.end() || !vit->second.attr[0].has) continue;
+            GLuint vb = vit->second.attr[0].buf;
+            GLsizei stride = vit->second.attr[0].stride;
+            auto bit = g_bufs.find(vb);
+            if (bit == g_bufs.end() || bit->second.data.empty() || stride <= 0) continue;
+            const uint8_t* base = bit->second.data.data();
+            size_t nv = bit->second.data.size() / (size_t)stride;
+            std::vector<float> o3;
+            o3.reserve(nv * 3);
+            for (size_t i = 0; i < nv; i++) {
+                const float* f3 = (const float*)(base + i * (size_t)stride);
+                o3.push_back(f3[0]); o3.push_back(f3[1]); o3.push_back(f3[2]);
+            }
+            FILE* f = fopen(path.c_str(), "wb");
+            if (f) {
+                fwrite(o3.data(), 4, o3.size(), f);
+                fclose(f);
+                LOGI("dumped vb %s nv=%zu stride=%d", path.c_str(), nv, stride);
+                pt.done = true;
             }
         }
     }
