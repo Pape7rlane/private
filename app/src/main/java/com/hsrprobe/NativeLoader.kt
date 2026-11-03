@@ -16,20 +16,20 @@ object NativeLoader {
     external fun nativeDump(): String
     external fun nativeStatus(): String
 
-    fun load(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun load(lpparam: XC_LoadPackage.LoadPackageParam, moduleApkPath: String?) {
         if (loaded) return
         synchronized(this) {
             if (loaded) return
-            doLoad(lpparam)
+            doLoad(lpparam, moduleApkPath)
             loaded = true
         }
     }
 
-    private fun doLoad(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun doLoad(lpparam: XC_LoadPackage.LoadPackageParam, moduleApkPath: String?) {
         val abi = if (android.os.Process.is64Bit()) "arm64-v8a" else "armeabi-v7a"
         val entryName = "lib/" + abi + "/" + LIB
 
-        val apkPath = findModuleApk(lpparam, entryName)
+        val apkPath = findModuleApk(lpparam, entryName, moduleApkPath)
             ?: throw IllegalStateException("cannot locate module apk")
         Log.i(TAG, "module apk: " + apkPath)
 
@@ -58,8 +58,15 @@ object NativeLoader {
         System.load(out.absolutePath)
     }
 
-    private fun findModuleApk(lpparam: XC_LoadPackage.LoadPackageParam, entryName: String): String? {
+    private fun findModuleApk(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        entryName: String,
+        moduleApkPath: String?
+    ): String? {
         val cands = LinkedHashSet<String>()
+
+        // 0) initZygote 给的 modulePath, 正常情况下就是它
+        if (!moduleApkPath.isNullOrEmpty()) cands.add(moduleApkPath)
 
         // 1) LSPosed 的 modulePath (可能被混淆, 一般拿不到)
         for (name in arrayOf("modulePath", "getModulePath")) {
