@@ -304,6 +304,7 @@ struct Patch {
     uint32_t    first = 0, cnt = 0;
     std::string file;
     bool        done = false;
+    uint32_t    hits = 0;
     // ib 替换
     std::vector<uint8_t> ib;
     GLuint      glBuf = 0;
@@ -512,6 +513,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.done = true;
             }
         } else if (pt.action == 6) {
+            // 每 500 次命中覆盖一次, 抓"角色真正在画面里"那一帧
+            if ((pt.hits++ % 500) != 0) continue;
             auto vit = g_vaos.find(g_curVao);
             if (vit == g_vaos.end()) continue;
             // 顶点数 = 索引最大值 + 1
@@ -552,6 +555,20 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     if (bf) { fwrite(mp, 1, want, bf); fclose(bf); }
                     if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
                     fprintf(mf, "  mapped=1 wrote=%zu\n", want);
+                    if (i == 0 && a.size == 3 && a.type == GL_FLOAT) {
+                        const float* f = (const float*)mp;
+                        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+                        for (uint32_t k = 0; k < vcount; k++) {
+                            for (int c = 0; c < 3; c++) {
+                                float v = f[(size_t)k * (a.stride / 4) + c];
+                                if (v != v || v > 1e6f || v < -1e6f) continue;
+                                if (v < lo[c]) lo[c] = v;
+                                if (v > hi[c]) hi[c] = v;
+                            }
+                        }
+                        LOGI("MESH bbox %.3f %.3f %.3f -> %.3f %.3f %.3f prog=%u",
+                             lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], g_curProg);
+                    }
                 } else {
                     fprintf(mf, "  mapped=0\n");
                 }
