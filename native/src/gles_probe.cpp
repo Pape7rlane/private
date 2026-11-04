@@ -436,7 +436,14 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
             pt.perm = (int)strtoul(a3, nullptr, 0);
-            if (n >= 6) {
+            if (n >= 6 && !strcmp(a5, "red")) {
+                pt.ddsW = 64; pt.ddsH = 64;
+                pt.dds.assign(64 * 64 * 4, 0);
+                for (size_t q = 0; q < pt.dds.size(); q += 4) {
+                    pt.dds[q] = 255; pt.dds[q+1] = 0; pt.dds[q+2] = 0; pt.dds[q+3] = 255;
+                }
+                LOGI("patch vbstatic dds=RED 64x64");
+            } else if (n >= 6) {
                 std::string df = std::string(g_dir) + "/" + a5;
                 TexOv t;
                 if (load_dds(df.c_str(), t)) {
