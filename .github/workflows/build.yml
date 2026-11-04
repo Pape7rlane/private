@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -62,7 +65,21 @@ jobs:
           KS_PASS: android
           KS_ALIAS: ci
 
-      - uses: actions/upload-artifact@v4
+      # 产物直接以 .apk 形式上架 Release, 下载即是 APK, 不再打 zip
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk \
+             "dist/HSRModProbe-probe${GITHUB_RUN_NUMBER}.apk"
+          ls -la dist
+
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
         with:
-          name: probe-apk
-          path: app/build/outputs/apk/release/*.apk
+          tag_name: probe-${{ github.run_number }}
+          name: probe ${{ github.run_number }}
+          body: ${{ github.event.head_commit.message }}
+          files: dist/*.apk
+          draft: false
+          prerelease: true
+          make_latest: false

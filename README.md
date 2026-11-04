@@ -164,7 +164,13 @@ skip / skipall / skipcnt <min> <max>
 
 ### 构建
 
-推到 GitHub，Actions 自动跑（约 1.5 分钟），取 artifacts 里的 `probe-apk`。
+推到 GitHub，Actions 自动跑（约 1.5 分钟）。产物**直接以 `.apk` 上架 Release**，不再是 zip：
+
+~~~
+Releases → probe-<构建号> → HSRModProbe-probe<构建号>.apk
+~~~
+
+下载即可直接安装。命令行等价：`gh release download probe-<构建号> --pattern '*.apk'`。
 
 本地构建需要 Android SDK + NDK 26.1 + CMake 3.22 + JDK 17：
 
