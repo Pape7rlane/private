@@ -422,6 +422,23 @@ void load_patches() {
             if (n < 2) continue;
             pt.action = 11;
             pt.hash = strtoull(a1, nullptr, 16);
+        } else if (!strcmp(cmd, "vbstatic")) {
+            // vbstatic <ibhash> <posfile> <perm> [alignX]
+            if (n < 4) continue;
+            pt.action = 17;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+            pt.perm = (int)strtoul(a3, nullptr, 0);
+            std::string fp = std::string(g_dir) + "/" + pt.file;
+            FILE* vf = fopen(fp.c_str(), "rb");
+            if (!vf) { LOGE("vbstatic: cannot open %s", fp.c_str()); continue; }
+            fseek(vf, 0, SEEK_END); long sz = ftell(vf); fseek(vf, 0, SEEK_SET);
+            if (sz <= 0 || sz > (64 << 20)) { fclose(vf); continue; }
+            pt.ib.resize((size_t)sz);
+            if (fread(pt.ib.data(), 1, (size_t)sz, vf) != (size_t)sz) { fclose(vf); continue; }
+            fclose(vf);
+            LOGI("patch vbstatic hash=%08llx %s %ld bytes perm=%d",
+                 (unsigned long long)pt.hash, pt.file.c_str(), sz, pt.perm);
         } else if (!strcmp(cmd, "iblist")) {
             pt.action = 16;
         } else if (!strcmp(cmd, "ibfind")) {
@@ -956,6 +973,86 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     LOGI("TEXSTAT %08llx no query fn", (unsigned long long)wh1);
                 }
             }
+            continue;
+        }
+        if (pt.action == 17) {
+            if (pt.done) {
+                if (pt.glBuf) { g_vbBinds.clear(); VbBind vb; vb.idx = pt.dynPosAttr; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+                continue;
+            }
+            LiveAttr la[16];
+            capture_vao(la);
+            int pos = -1;
+            for (int i = 0; i < 16; i++) {
+                if (la[i].enabled && la[i].size >= 3 && la[i].type == GL_FLOAT) { pos = i; break; }
+            }
+            uint32_t vcount = 0;
+            if (it != g_bufs.end() && !it->second.data.empty()) {
+                const uint16_t* ip = (const uint16_t*)it->second.data.data();
+                size_t in = it->second.data.size() / 2;
+                for (size_t k = 0; k < in; k++) if ((uint32_t)ip[k] + 1u > vcount) vcount = (uint32_t)ip[k] + 1u;
+            }
+            if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
+            pt.done = true;
+            pt.dynPosAttr = pos;
+            const LiveAttr& a = la[pos];
+            if (!a.buf || a.stride <= 0) continue;
+            const size_t off = (size_t)(uintptr_t)a.ptr;
+            const size_t want = off + (size_t)vcount * (size_t)a.stride;
+            if (want > (16u << 20)) continue;
+            GLuint savedArr = g_curArray;
+            o_glBindBuffer(GL_ARRAY_BUFFER, a.buf);
+            void* mp = o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)want, GL_MAP_READ_BIT);
+            if (!mp) { o_glBindBuffer(GL_ARRAY_BUFFER, savedArr); continue; }
+            std::vector<uint8_t> cur((const uint8_t*)mp, (const uint8_t*)mp + want);
+            if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+            o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+
+            // 参考包围盒（安卓）
+            float rmin[3] = {1e30f,1e30f,1e30f}, rmax[3] = {-1e30f,-1e30f,-1e30f};
+            for (uint32_t v = 0; v < vcount; v++) {
+                const float* p = (const float*)(cur.data() + off + (size_t)v * (size_t)a.stride);
+                for (int c = 0; c < 3; c++) {
+                    if (p[c] != p[c]) continue;
+                    if (p[c] < rmin[c]) rmin[c] = p[c];
+                    if (p[c] > rmax[c]) rmax[c] = p[c];
+                }
+            }
+            // mod 包围盒（置换后）
+            const size_t n = std::min((size_t)vcount, pt.ib.size() / 40);
+            float mmin[3] = {1e30f,1e30f,1e30f}, mmax[3] = {-1e30f,-1e30f,-1e30f};
+            std::vector<float> mv(n * 3);
+            for (size_t v = 0; v < n; v++) {
+                const float* src = (const float*)(pt.ib.data() + v * 40);
+                float out[3];
+                permute_xyz(src, pt.perm, out);
+                mv[v*3+0] = out[0]; mv[v*3+1] = out[1]; mv[v*3+2] = out[2];
+                for (int c = 0; c < 3; c++) {
+                    if (out[c] < mmin[c]) mmin[c] = out[c];
+                    if (out[c] > mmax[c]) mmax[c] = out[c];
+                }
+            }
+            float rspan = rmax[0] - rmin[0], mspan = mmax[0] - mmin[0];
+            float sc = (mspan > 1e-6f && rspan > 1e-6f) ? (rspan / mspan) : 1.0f;
+            float offY = 0.5f * (rmin[1] + rmax[1]) - 0.5f * (mmin[1] + mmax[1]) * sc;
+            float offZ = 0.5f * (rmin[2] + rmax[2]) - 0.5f * (mmin[2] + mmax[2]) * sc;
+            LOGI("vbstatic bbox ref X %.3f..%.3f Y %.3f..%.3f Z %.3f..%.3f", rmin[0],rmax[0],rmin[1],rmax[1],rmin[2],rmax[2]);
+            LOGI("vbstatic bbox mod X %.3f..%.3f Y %.3f..%.3f Z %.3f..%.3f scale=%.4f", mmin[0],mmax[0],mmin[1],mmax[1],mmin[2],mmax[2], sc);
+
+            std::vector<uint8_t> outb = cur;
+            for (size_t v = 0; v < n; v++) {
+                float* dst = (float*)(outb.data() + off + v * (size_t)a.stride);
+                dst[0] = (mv[v*3+0] - mmin[0]) * sc + rmin[0];
+                dst[1] = mv[v*3+1] * sc + offY;
+                dst[2] = mv[v*3+2] * sc + offZ;
+            }
+            o_glGenBuffers(1, &pt.glBuf);
+            o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
+            o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)outb.size(), outb.data(), GL_DYNAMIC_DRAW);
+            o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+            LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
+            g_vbBinds.clear();
+            { VbBind vb; vb.idx = pos; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
             continue;
         }
         if (pt.action == 12) {
