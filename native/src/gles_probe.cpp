@@ -431,6 +431,19 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
             pt.perm = (int)strtoul(a3, nullptr, 0);
+            if (n >= 5) {
+                std::string uf = std::string(g_dir) + "/" + a4;
+                FILE* ff = fopen(uf.c_str(), "rb");
+                if (ff) {
+                    fseek(ff, 0, SEEK_END); long usz = ftell(ff); fseek(ff, 0, SEEK_SET);
+                    if (usz > 0 && usz <= (64 << 20)) {
+                        pt.blend.resize((size_t)usz);
+                        if (fread(pt.blend.data(), 1, (size_t)usz, ff) != (size_t)usz) pt.blend.clear();
+                    }
+                    fclose(ff);
+                    LOGI("patch vbstatic uv=%s %ld bytes", a4, usz);
+                }
+            }
             std::string fp = std::string(g_dir) + "/" + pt.file;
             FILE* vf = fopen(fp.c_str(), "rb");
             if (!vf) { LOGE("vbstatic: cannot open %s", fp.c_str()); continue; }
@@ -1137,6 +1150,40 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             for (size_t v = 0; v < n; v++) {
                 const float* d = (const float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
                 pt.dynBase[v*3+0] = d[0]; pt.dynBase[v*3+1] = d[1]; pt.dynBase[v*3+2] = d[2];
+            }
+            // UV 替换: mod Texcoord stride 20 -> uv0@4, uv1@12
+            if (!pt.blend.empty()) {
+                const size_t nuv = pt.blend.size() / 20;
+                for (int i = 0; i < 16; i++) {
+                    if (!la[i].enabled || la[i].size != 2 || la[i].type != GL_FLOAT) continue;
+                    if (!la[i].buf || la[i].stride <= 0) continue;
+                    const size_t uoff = (size_t)(uintptr_t)la[i].ptr;
+                    const size_t unw = uoff + (size_t)vcount * (size_t)la[i].stride;
+                    if (unw > (16u << 20)) continue;
+                    GLuint sv = g_curArray;
+                    o_glBindBuffer(GL_ARRAY_BUFFER, la[i].buf);
+                    void* up = o_glMapBufferRange ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)unw, GL_MAP_READ_BIT) : nullptr;
+                    if (!up) { o_glBindBuffer(GL_ARRAY_BUFFER, sv); continue; }
+                    std::vector<uint8_t> ub((const uint8_t*)up, (const uint8_t*)up + unw);
+                    if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                    o_glBindBuffer(GL_ARRAY_BUFFER, sv);
+                    const size_t cnt = std::min((size_t)vcount, nuv);
+                    // 判断是 uv0 还是 uv1: 取 offset 4 为 uv0, 12 为 uv1
+                    const size_t srcOff = (uoff >= 12) ? 12 : 4;
+                    for (size_t v = 0; v < cnt; v++) {
+                        const float* sp = (const float*)(pt.blend.data() + v * 20 + srcOff);
+                        float* dp = (float*)(ub.data() + uoff + v * (size_t)la[i].stride);
+                        dp[0] = sp[0];
+                        dp[1] = 1.0f - sp[1];
+                    }
+                    GLuint nub = 0;
+                    o_glGenBuffers(1, &nub);
+                    o_glBindBuffer(GL_ARRAY_BUFFER, nub);
+                    o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)ub.size(), ub.data(), GL_STATIC_DRAW);
+                    o_glBindBuffer(GL_ARRAY_BUFFER, sv);
+                    g_vbBinds.push_back({i, nub});
+                    LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u", i, uoff, la[i].stride, cnt, nub);
+                }
             }
             LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
             g_vbBinds.clear();
