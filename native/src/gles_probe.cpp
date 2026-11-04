@@ -1085,7 +1085,23 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     if (mp2) {
                         const uint8_t* nw = (const uint8_t*)mp2;
                         size_t cnt = pt.dynMap.size();
-                        if (pt.mode == 2) {
+                        if (pt.mode == 3) {
+                            for (size_t v = 0; v < cnt; v++) {
+                                uint32_t ri = pt.dynMap[v];
+                                const float* src = (const float*)(nw + oo + (size_t)ri * (size_t)aa.stride);
+                                float* dst = (float*)(pt.dynBuf.data() + oo + v * (size_t)aa.stride);
+                                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                            }
+                        } else if (pt.mode == 4) {
+                            for (size_t v = 0; v < cnt; v++) {
+                                uint32_t ri = pt.dynMap[v];
+                                const float* src = (const float*)(nw + oo + (size_t)ri * (size_t)aa.stride);
+                                float* dst = (float*)(pt.dynBuf.data() + oo + v * (size_t)aa.stride);
+                                dst[0] = 0.65f * src[0] + 0.35f * pt.dynBase[v*3+0];
+                                dst[1] = 0.65f * src[1] + 0.35f * pt.dynBase[v*3+1];
+                                dst[2] = 0.65f * src[2] + 0.35f * pt.dynBase[v*3+2];
+                            }
+                        } else if (pt.mode == 2) {
                             size_t nvc = pt.dynRef.size() / 3;
                             float cx = 0, cy = 0, cz = 0;
                             for (size_t v = 0; v < nvc; v++) {
