@@ -792,6 +792,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
         if (pt.action == 15) {
             if (pt.done) continue;
+            if (pt.hits++ < 3000) continue;
             if (pt.ib.size() < 16) { pt.done = true; continue; }
             size_t npre = pt.ib.size();
             int found = 0;
