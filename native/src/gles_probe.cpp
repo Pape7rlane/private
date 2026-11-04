@@ -332,6 +332,8 @@ struct Patch {
     // vbpos 替换
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
+    std::vector<uint8_t>  dds;
+    int ddsW = 0, ddsH = 0;
     std::vector<uint32_t> dynMap;
     std::vector<float>    dynBase;
     // vbmod: 全属性替换
@@ -431,6 +433,18 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
             pt.perm = (int)strtoul(a3, nullptr, 0);
+            if (n >= 6) {
+                std::string df = std::string(g_dir) + "/" + a5;
+                TexOv t;
+                if (load_dds(df.c_str(), t)) {
+                    pt.dynBase.push_back(1.0f);
+                    pt.ddsW = t.w; pt.ddsH = t.h;
+                    pt.dds.assign(t.rgba.begin(), t.rgba.end());
+                    LOGI("patch vbstatic dds=%s %dx%d", a5, t.w, t.h);
+                } else {
+                    LOGE("vbstatic dds load fail %s", df.c_str());
+                }
+            }
             if (n >= 5) {
                 std::string uf = std::string(g_dir) + "/" + a4;
                 FILE* ff = fopen(uf.c_str(), "rb");
@@ -720,11 +734,30 @@ void capture_vao(LiveAttr out[16]) {
 }
 
 // 顶点属性临时重绑（支持多个属性）
+GLuint g_modTex = 0;
+GLint  g_modTexPrev = 0;
+int    g_modTexUnit = 1;
+
 struct VbBind { int idx = -1; GLuint newBuf = 0; Attr saved; };
 std::vector<VbBind> g_vbBinds;
 GLuint g_vbSavedArray = 0;
 
 void apply_vb() {
+    if (g_modTex) {
+        typedef void (*PFNACT)(GLenum);
+        typedef void (*PFNBINDT)(GLenum, GLuint);
+        typedef void (*PFNGETI)(GLenum, GLint*);
+        static PFNACT pact = nullptr; static PFNBINDT pbind = nullptr; static PFNGETI pgeti = nullptr;
+        if (!pact) pact = (PFNACT)gl_real("glActiveTexture");
+        if (!pbind) pbind = (PFNBINDT)gl_real("glBindTexture");
+        if (!pgeti) pgeti = (PFNGETI)gl_real("glGetIntegerv");
+        if (pact && pbind) {
+            pact(GL_TEXTURE0 + g_modTexUnit);
+            if (pgeti) { g_modTexPrev = 0; pgeti(GL_TEXTURE_BINDING_2D, &g_modTexPrev); }
+            pbind(GL_TEXTURE_2D, g_modTex);
+            pact(GL_TEXTURE0);
+        }
+    }
     if (g_vbBinds.empty() || !o_glBindBuffer || !o_glVertexAttribPointer) return;
     LiveAttr la[16];
     capture_vao(la);
@@ -746,6 +779,18 @@ void apply_vb() {
 }
 
 void restore_vb() {
+    if (g_modTex) {
+        typedef void (*PFNACT)(GLenum);
+        typedef void (*PFNBINDT)(GLenum, GLuint);
+        static PFNACT pact = nullptr; static PFNBINDT pbind = nullptr;
+        if (!pact) pact = (PFNACT)gl_real("glActiveTexture");
+        if (!pbind) pbind = (PFNBINDT)gl_real("glBindTexture");
+        if (pact && pbind) {
+            pact(GL_TEXTURE0 + g_modTexUnit);
+            pbind(GL_TEXTURE_2D, (GLuint)g_modTexPrev);
+            pact(GL_TEXTURE0);
+        }
+    }
     if (g_vbBinds.empty()) return;
     if (o_glBindBuffer && o_glVertexAttribPointer) {
         for (auto& b : g_vbBinds) {
@@ -1159,6 +1204,30 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.dynBase[v*3+0] = d[0]; pt.dynBase[v*3+1] = d[1]; pt.dynBase[v*3+2] = d[2];
             }
             LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
+            if (!pt.dds.empty()) {
+                typedef void (*PFNGENTEX)(GLsizei, GLuint*);
+                typedef void (*PFNTEXPARAM)(GLenum, GLenum, GLint);
+                static PFNGENTEX pgen = nullptr; static PFNTEXPARAM pparam = nullptr;
+                if (!pgen) pgen = (PFNGENTEX)gl_real("glGenTextures");
+                if (!pparam) pparam = (PFNTEXPARAM)gl_real("glTexParameteri");
+                if (pgen && o_glBindTexture && o_glTexImage2D) {
+                    GLuint nt = 0;
+                    pgen(1, &nt);
+                    GLint prev = 0;
+                    o_glBindTexture(GL_TEXTURE_2D, nt);
+                    o_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pt.ddsW, pt.ddsH, 0,
+                                   GL_RGBA, GL_UNSIGNED_BYTE, pt.dds.data());
+                    if (pparam) {
+                        pparam(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        pparam(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        pparam(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                        pparam(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+                    }
+                    (void)prev;
+                    g_modTex = nt;
+                    LOGI("vbstatic mod texture id=%u %dx%d", nt, pt.ddsW, pt.ddsH);
+                }
+            }
             g_vbBinds.clear();
             // UV 替换: mod Texcoord stride 20 -> uv0@4, uv1@12
             if (!pt.blend.empty()) {
