@@ -120,6 +120,44 @@ hash = crc32c(hash, &D3D11_BUFFER_DESC, 24);
 - mod 里**只有 `March7thHeadADiffuse.dds` 贴图，没有 Head 的几何**，所以头部只能换贴图，不能换形状。
 - `March7thHairA.ib` 在 277 个缓存 IB 里 `ibfind` 零匹配 —— 安卓的头发网格很可能是运行时重建的，hash 每次不同，需要按「顶点数 + 包围盒」之类的软特征去认。
 
+#### 2026-11-04 傍晚：找到骨骼矩阵的入口
+
+`libunity.so` 没有被完全 strip（431 个导出函数），里面有 Unity 的 CPU 蒙皮实现：
+
+~~~
+_s_SkinVertices_NEON
+_s_SkinVertices2Bones_NEON
+_s_SkinVertices4Bones_NEON
+_s_SkinVertices4Bones_Tangents_NEON  ...
+~~~
+
+反汇编 `_s_SkinVertices4Bones_NEON` 得到的签名：
+
+| 寄存器 | 含义 |
+|---|---|
+| x0 | 骨骼矩阵数组，每个 64 字节（4x4） |
+| x1 | 输入顶点，24 字节/顶点 |
+| x2 | 输入结束指针 |
+| x3 | 骨骼索引 + 权重，24 字节/顶点 |
+| x4 | 输出顶点 |
+
+**hook 它就能直接拿到骨骼矩阵**，不需要 il2cpp、不需要 dump metadata、不需要破 MHY 加密。
+有了骨骼矩阵 + mod 自带的 `March7thBodyBlend.buf`，就能做真正的 GPU 蒙皮，A-pose 问题从根上解决。
+
+当前探针会在第一次调用时 dump `skin_bones.bin` / `skin_in.bin` / `skin_bd.bin` / `skin_out.bin`，用来离线确认骨骼数量与索引顺序。
+
+#### metadata 的实际情况
+
+运行时内存映射显示 metadata 是**明文映射在 sdcard 上**的：
+
+~~~
+7550400000-75568ae000 r--s  .../files/il2cpp/Metadata/global-metadata.dat
+~~~
+
+105 MB，文件头是 `4d 48 59 00` = `MHY\0`，不是标准的 `AF1BB1FA` —— 米哈游自定义的加密格式。
+`libil2cpp.so` 动态符号表里只有 3 个 `il2cpp_*`，全是 4 字节跳转桩，GIBox 依赖的 `il2cpp_domain_get` 等一个都没有。
+内存里能搜到明文的 `SkinnedMeshRenderer` / `UnityEngine` 字符串，说明字符串表没加密，但结构体仍是加密的。
+
 #### 走不通的路（记录一下，避免重复踩）
 
 - **il2cpp dump**：`libil2cpp.so` 实测 **459 MB**（正常 il2cpp 50–100 MB），重度加固。`il2cpp_get_api_table` 是 4 字节跳进混淆派发器，调用即 SIGSEGV；4.2 GB 内存里扫不到 `AF1BB1FA` metadata 明文。要拆得先定位壳的解密 stub，成本远高于图形层。

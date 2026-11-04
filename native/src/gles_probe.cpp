@@ -2114,6 +2114,60 @@ void* dlsym_hook(void* handle, const char* name) {
     return o_dlsym ? o_dlsym(handle, name) : nullptr;
 }
 
+
+// ---- Unity CPU 蒙皮 hook: 抓骨骼矩阵 ----
+// libunity.so 导出 _s_SkinVertices4Bones_NEON, 签名由反汇编得到:
+//   x0 = 骨骼矩阵数组 (每个 64 字节 4x4), x1 = 输入顶点 (24 字节/顶点),
+//   x2 = 输入结束指针, x3 = 骨骼索引+权重 (24 字节/顶点), x4 = 输出顶点
+typedef void (*SkinFn)(const float* bones, const float* in, const float* end,
+                       const uint8_t* boneData, float* out);
+static SkinFn o_skin4 = nullptr;
+static SkinFn o_skin2 = nullptr;
+static std::atomic<int> g_skinN4{0};
+static std::atomic<int> g_skinN2{0};
+
+static void dump_bytes(const char* name, const void* p, size_t n) {
+    if (!g_dir[0] || !p || !n) return;
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", g_dir, name);
+    FILE* f = fopen(path, "wb");
+    if (!f) { LOGE("dump open fail %s", path); return; }
+    fwrite(p, 1, n, f);
+    fclose(f);
+    LOGI("dump %s %zu bytes", name, n);
+}
+
+static void on_skin4(const float* bones, const float* in, const float* end,
+                     const uint8_t* bd, float* out) {
+    if (g_skinN4.fetch_add(1) == 0) {
+        size_t vn = (size_t)((const uint8_t*)end - (const uint8_t*)in) / 24;
+        if (vn > 60000) vn = 60000;
+        LOGI("skin4 verts=%zu", vn);
+        dump_bytes("skin_bones.bin", bones, 64 * 256);
+        dump_bytes("skin_in.bin", in, vn * 24);
+        dump_bytes("skin_bd.bin", bd, vn * 24);
+        if (o_skin4) o_skin4(bones, in, end, bd, out);
+        dump_bytes("skin_out.bin", out, vn * 12);
+        return;
+    }
+    if (o_skin4) o_skin4(bones, in, end, bd, out);
+}
+
+static void on_skin2(const float* bones, const float* in, const float* end,
+                     const uint8_t* bd, float* out) {
+    if (g_skinN2.fetch_add(1) == 0) {
+        size_t vn = (size_t)((const uint8_t*)end - (const uint8_t*)in) / 24;
+        if (vn > 60000) vn = 60000;
+        LOGI("skin2 verts=%zu", vn);
+        dump_bytes("skin2_bones.bin", bones, 64 * 256);
+        dump_bytes("skin2_in.bin", in, vn * 24);
+        dump_bytes("skin2_bd.bin", bd, vn * 24);
+        if (o_skin2) o_skin2(bones, in, end, bd, out);
+        dump_bytes("skin2_out.bin", out, vn * 12);
+        return;
+    }
+    if (o_skin2) o_skin2(bones, in, end, bd, out);
+}
 }  // namespace
 
 void gles_probe_start(const char* out_dir) {
@@ -2161,5 +2215,22 @@ void gles_probe_start(const char* out_dir) {
             else { LOGE("DobbyHook dlsym failed rc=%d", rc); o_dlsym = nullptr; }
         }
     }
+
+    // 4) Unity CPU 蒙皮: 抓骨骼矩阵
+    void* uni = dlopen("libunity.so", RTLD_NOW | RTLD_LOCAL);
+    if (uni) {
+        void* t4 = dlsym(uni, "_s_SkinVertices4Bones_NEON");
+        if (t4) {
+            int rc = DobbyHook(t4, (void*)&on_skin4, (void**)&o_skin4);
+            if (rc == 0 && o_skin4) LOGI("hooked skin4 @ %p", t4);
+            else LOGE("DobbyHook skin4 failed rc=%d", rc);
+        } else LOGW("no _s_SkinVertices4Bones_NEON");
+        void* t2 = dlsym(uni, "_s_SkinVertices2Bones_NEON");
+        if (t2) {
+            int rc = DobbyHook(t2, (void*)&on_skin2, (void**)&o_skin2);
+            if (rc == 0 && o_skin2) LOGI("hooked skin2 @ %p", t2);
+            else LOGE("DobbyHook skin2 failed rc=%d", rc);
+        } else LOGW("no _s_SkinVertices2Bones_NEON");
+    } else LOGE("dlopen libunity.so failed");
 }
 
