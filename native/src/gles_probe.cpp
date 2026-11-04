@@ -1211,6 +1211,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 static PFNGENTEX pgen = nullptr; static PFNTEXPARAM pparam = nullptr;
                 if (!pgen) pgen = (PFNGENTEX)gl_real("glGenTextures");
                 if (!pparam) pparam = (PFNTEXPARAM)gl_real("glTexParameteri");
+                if (!o_glTexImage2D) o_glTexImage2D = (decltype(&glTexImage2D))gl_real("glTexImage2D");
+                if (!o_glBindTexture) o_glBindTexture = (decltype(&glBindTexture))gl_real("glBindTexture");
                 if (pgen && o_glBindTexture && o_glTexImage2D) {
                     GLuint nt = 0;
                     pgen(1, &nt);
