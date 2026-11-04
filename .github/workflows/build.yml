@@ -65,21 +65,24 @@ jobs:
           KS_PASS: android
           KS_ALIAS: ci
 
-      # 产物直接以 .apk 形式上架 Release, 下载即是 APK, 不再打 zip
-      - name: Stage APK
+      # GitHub 的 artifact 一定会被自动打成 zip, 所以改成把 .apk 直接推到 dist 分支,
+      # 产物就是一个裸 APK 文件, 不再是压缩包。
+      - name: Publish APK to dist branch
         run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk \
-             "dist/HSRModProbe-probe${GITHUB_RUN_NUMBER}.apk"
-          ls -la dist
-
-      - name: Publish APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: probe-${{ github.run_number }}
-          name: probe ${{ github.run_number }}
-          body: ${{ github.event.head_commit.message }}
-          files: dist/*.apk
-          draft: false
-          prerelease: true
-          make_latest: false
+          APK="HSRModProbe-probe${GITHUB_RUN_NUMBER}.apk"
+          WORK="$(mktemp -d)"
+          git config --global user.name  "ci"
+          git config --global user.email "ci@users.noreply.github.com"
+          git -C "$WORK" init -q
+          git -C "$WORK" checkout -q -b dist
+          cp app/build/outputs/apk/release/app-release.apk "$WORK/$APK"
+          git -C "$WORK" add "$APK"
+          git -C "$WORK" commit -qm "probe ${GITHUB_RUN_NUMBER}"
+          git -C "$WORK" push -q -f \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" dist
+          URL="https://github.com/${{ github.repository }}/raw/dist/$APK"
+          echo "### APK (裸文件, 直接下载)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "本地拉取: \`gh api repos/${{ github.repository }}/contents/$APK?ref=dist -H 'Accept: application/vnd.github.raw' > $APK\`" >> "$GITHUB_STEP_SUMMARY"

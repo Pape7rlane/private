@@ -164,13 +164,22 @@ skip / skipall / skipcnt <min> <max>
 
 ### 构建
 
-推到 GitHub，Actions 自动跑（约 1.5 分钟）。产物**直接以 `.apk` 上架 Release**，不再是 zip：
+推到 GitHub，Actions 自动跑（约 1.5 分钟）。
+
+**产物是一个裸 `.apk` 文件，不是压缩包。** GitHub 的 `upload-artifact` 无论传什么都会自动打 zip，所以 CI 改成把 APK 直接推到 `dist` 分支：
 
 ~~~
-Releases → probe-<构建号> → HSRModProbe-probe<构建号>.apk
+https://github.com/Pape7rlane/private/raw/dist/HSRModProbe-probe<构建号>.apk
 ~~~
 
-下载即可直接安装。命令行等价：`gh release download probe-<构建号> --pattern '*.apk'`。
+每次构建覆盖 `dist` 分支，只保留最新一个（文件名带构建号，方便对版本）。Actions 运行页面的 Summary 里也会打印这个直链。
+
+命令行拉取：
+
+~~~bash
+gh api repos/Pape7rlane/private/contents/HSRModProbe-probe<构建号>.apk?ref=dist \
+  -H 'Accept: application/vnd.github.raw' > HSRModProbe.apk
+~~~
 
 本地构建需要 Android SDK + NDK 26.1 + CMake 3.22 + JDK 17：
 
