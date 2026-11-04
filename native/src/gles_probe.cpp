@@ -334,7 +334,6 @@ struct Patch {
     uint32_t    srcOffset = 0;
     std::vector<uint32_t> dynMap;
     std::vector<float>    dynBase;
-    std::vector<uint8_t>  dynBuf;
     // vbmod: 全属性替换
     int         perm = 0;
     float       scale = 1.0f;
