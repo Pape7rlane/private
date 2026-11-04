@@ -422,6 +422,8 @@ void load_patches() {
             if (n < 2) continue;
             pt.action = 11;
             pt.hash = strtoull(a1, nullptr, 16);
+        } else if (!strcmp(cmd, "iblist")) {
+            pt.action = 16;
         } else if (!strcmp(cmd, "ibfind")) {
             // ibfind <file>  — 用文件前 64 字节在所有已缓存的 IB 里找匹配
             if (n < 2) continue;
@@ -770,6 +772,21 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         if (pt.action == 3) { c_skipped++; skip = true; continue; }
         if (pt.action == 4) {
             if (count >= (GLsizei)pt.first && count <= (GLsizei)pt.cnt) { c_skipped++; skip = true; }
+            continue;
+        }
+        if (pt.action == 16) {
+            if (pt.done) continue;
+            pt.done = true;
+            LOGI("IBLIST %zu cached", g_bufs.size());
+            for (auto& kv : g_bufs) {
+                const auto& bd = kv.second.data;
+                if (bd.size() < 16) continue;
+                char hx[40];
+                snprintf(hx, sizeof hx, "%02x%02x%02x%02x%02x%02x%02x%02x",
+                         bd[0], bd[1], bd[2], bd[3], bd[4], bd[5], bd[6], bd[7]);
+                LOGI("  ib id=%u size=%zu hash=%08x tgt=%x pre=%s",
+                     kv.first, bd.size(), kv.second.h_ib, kv.second.target, hx);
+            }
             continue;
         }
         if (pt.action == 15) {
