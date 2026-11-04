@@ -822,6 +822,7 @@ void permute_xyz(const float* s, int perm, float* d) {
 
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basev = 0) {
     c_draw++;
+    g_modTexActive = false;
     GLuint eb = cur_elem();
     const size_t esz = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_BYTE ? 1 : 2);
     uint64_t h1 = 0, h1a = 0, wh1 = 0, wh1a = 0;
