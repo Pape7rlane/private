@@ -667,7 +667,7 @@ __attribute__((constructor)) static void probe_on_load() {
     }
     install_hooks();
     gles_probe_start(g_out.c_str());
-    il2cpp_probe_start();
+    // il2cpp_probe_start();  // il2cpp_get_api_table is a trap in this build: calling it SIGSEGVs
     LOGI("hsrprobe ready");
 }
 
