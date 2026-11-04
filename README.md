@@ -144,7 +144,12 @@ _s_SkinVertices4Bones_Tangents_NEON  ...
 **hook 它就能直接拿到骨骼矩阵**，不需要 il2cpp、不需要 dump metadata、不需要破 MHY 加密。
 有了骨骼矩阵 + mod 自带的 `March7thBodyBlend.buf`，就能做真正的 GPU 蒙皮，A-pose 问题从根上解决。
 
-当前探针会在第一次调用时 dump `skin_bones.bin` / `skin_in.bin` / `skin_bd.bin` / `skin_out.bin`，用来离线确认骨骼数量与索引顺序。
+探针会挂上全部 8 个带骨骼的变体（2Bones / 4Bones × 普通 / NoNormals / Tangents / Tangents1），
+第一次被调用时 dump `skin<N>_bones.bin` / `skin<N>_in.bin` / `skin<N>_bd.bin` / `skin<N>_out.bin`，
+用来离线确认骨骼数量、索引顺序和真实步长。
+
+> 踩坑记录：先只挂了 `4Bones_NEON` 和 `2Bones_NEON`，实机跑了 130 万次 draw 都没触发 —— 崩铁用的是别的变体，必须全挂。
+> 另外写文件不能用 `fopen`：蒙皮函数在 Unity 渲染线程里调用，`fopen` 会触发 fdsan 的 fd 所有权检查直接 SIGABRT，得用 `open/write/close`。
 
 #### metadata 的实际情况
 

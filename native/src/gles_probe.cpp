@@ -2185,10 +2185,21 @@ static int find_unity_cb(struct dl_phdr_info* info, size_t, void*) {
 //   x2 = 输入结束指针, x3 = 骨骼索引+权重 (24 字节/顶点), x4 = 输出顶点
 typedef void (*SkinFn)(const float* bones, const float* in, const float* end,
                        const uint8_t* boneData, float* out);
-static SkinFn o_skin4 = nullptr;
-static SkinFn o_skin2 = nullptr;
-static std::atomic<int> g_skinN4{0};
-static std::atomic<int> g_skinN2{0};
+
+// libunity.so 里的蒙皮变体, 按骨骼数和是否带切线/法线分。崩铁走哪个未知, 全挂。
+static const char* kSkinSyms[] = {
+    "_s_SkinVertices2Bones_NEON",
+    "_s_SkinVertices2Bones_NoNormals_NEON",
+    "_s_SkinVertices2Bones_Tangents_NEON",
+    "_s_SkinVertices2Bones_Tangents1_NEON",
+    "_s_SkinVertices4Bones_NEON",
+    "_s_SkinVertices4Bones_NoNormals_NEON",
+    "_s_SkinVertices4Bones_Tangents_NEON",
+    "_s_SkinVertices4Bones_Tangents1_NEON",
+};
+static const int kSkinCount = 8;
+static SkinFn g_skinOrig[8] = {nullptr};
+static std::atomic<int> g_skinHits[8];
 
 // 用 POSIX open/write, 不用 stdio: 蒙皮函数在 Unity 渲染线程里调用,
 // fopen/freopen 会触发 fdsan 的 fd 所有权检查直接 SIGABRT。
@@ -2209,36 +2220,40 @@ static void dump_bytes(const char* name, const void* p, size_t n) {
     LOGI("dump %s %zu bytes", name, n);
 }
 
-static void on_skin4(const float* bones, const float* in, const float* end,
-                     const uint8_t* bd, float* out) {
-    if (g_skinN4.fetch_add(1) == 0) {
+template <int I>
+static void skin_thunk(const float* bones, const float* in, const float* end,
+                       const uint8_t* bd, float* out) {
+    if (g_skinHits[I].fetch_add(1) == 0) {
         size_t vn = (size_t)((const uint8_t*)end - (const uint8_t*)in) / 24;
         if (vn > 60000) vn = 60000;
-        LOGI("skin4 verts=%zu", vn);
-        dump_bytes("skin_bones.bin", bones, 64 * 256);
-        dump_bytes("skin_in.bin", in, vn * 24);
-        dump_bytes("skin_bd.bin", bd, vn * 24);
-        if (o_skin4) o_skin4(bones, in, end, bd, out);
-        dump_bytes("skin_out.bin", out, vn * 12);
+        LOGI("skin hit [%d] %s verts=%zu", I, kSkinSyms[I], vn);
+        char nm[64];
+        snprintf(nm, sizeof(nm), "skin%d_bones.bin", I);
+        dump_bytes(nm, bones, 64 * 256);
+        snprintf(nm, sizeof(nm), "skin%d_in.bin", I);
+        dump_bytes(nm, in, vn * 24);
+        snprintf(nm, sizeof(nm), "skin%d_bd.bin", I);
+        dump_bytes(nm, bd, vn * 24);
+        if (g_skinOrig[I]) g_skinOrig[I](bones, in, end, bd, out);
+        snprintf(nm, sizeof(nm), "skin%d_out.bin", I);
+        dump_bytes(nm, out, vn * 12);
         return;
     }
-    if (o_skin4) o_skin4(bones, in, end, bd, out);
+    if (g_skinOrig[I]) g_skinOrig[I](bones, in, end, bd, out);
 }
 
-static void on_skin2(const float* bones, const float* in, const float* end,
-                     const uint8_t* bd, float* out) {
-    if (g_skinN2.fetch_add(1) == 0) {
-        size_t vn = (size_t)((const uint8_t*)end - (const uint8_t*)in) / 24;
-        if (vn > 60000) vn = 60000;
-        LOGI("skin2 verts=%zu", vn);
-        dump_bytes("skin2_bones.bin", bones, 64 * 256);
-        dump_bytes("skin2_in.bin", in, vn * 24);
-        dump_bytes("skin2_bd.bin", bd, vn * 24);
-        if (o_skin2) o_skin2(bones, in, end, bd, out);
-        dump_bytes("skin2_out.bin", out, vn * 12);
-        return;
+static void install_skin(int i, void* addr) {
+    switch (i) {
+        case 0: DobbyHook(addr, (void*)&skin_thunk<0>, (void**)&g_skinOrig[0]); break;
+        case 1: DobbyHook(addr, (void*)&skin_thunk<1>, (void**)&g_skinOrig[1]); break;
+        case 2: DobbyHook(addr, (void*)&skin_thunk<2>, (void**)&g_skinOrig[2]); break;
+        case 3: DobbyHook(addr, (void*)&skin_thunk<3>, (void**)&g_skinOrig[3]); break;
+        case 4: DobbyHook(addr, (void*)&skin_thunk<4>, (void**)&g_skinOrig[4]); break;
+        case 5: DobbyHook(addr, (void*)&skin_thunk<5>, (void**)&g_skinOrig[5]); break;
+        case 6: DobbyHook(addr, (void*)&skin_thunk<6>, (void**)&g_skinOrig[6]); break;
+        case 7: DobbyHook(addr, (void*)&skin_thunk<7>, (void**)&g_skinOrig[7]); break;
+        default: break;
     }
-    if (o_skin2) o_skin2(bones, in, end, bd, out);
 }
 }  // namespace
 
@@ -2296,23 +2311,14 @@ void gles_probe_start(const char* out_dir) {
             dl_iterate_phdr(find_unity_cb, nullptr);
             if (g_unityBase) {
                 LOGI("libunity base=%p", g_unityBase);
-                if (!o_skin4) {
-                    void* t4 = elf_sym(g_unityBase, "_s_SkinVertices4Bones_NEON");
-                    if (t4) {
-                        int rc = DobbyHook(t4, (void*)&on_skin4, (void**)&o_skin4);
-                        if (rc == 0 && o_skin4) LOGI("hooked skin4 @ %p", t4);
-                        else LOGE("DobbyHook skin4 failed rc=%d", rc);
-                    } else LOGE("symbol _s_SkinVertices4Bones_NEON not found");
+                int n = 0;
+                for (int k = 0; k < kSkinCount; k++) {
+                    void* t = elf_sym(g_unityBase, kSkinSyms[k]);
+                    if (!t) { LOGW("sym %s missing", kSkinSyms[k]); continue; }
+                    install_skin(k, t);
+                    if (g_skinOrig[k]) { n++; LOGI("hook %s @ %p", kSkinSyms[k], t); }
                 }
-                if (!o_skin2) {
-                    void* t2 = elf_sym(g_unityBase, "_s_SkinVertices2Bones_NEON");
-                    if (t2) {
-                        int rc = DobbyHook(t2, (void*)&on_skin2, (void**)&o_skin2);
-                        if (rc == 0 && o_skin2) LOGI("hooked skin2 @ %p", t2);
-                        else LOGE("DobbyHook skin2 failed rc=%d", rc);
-                    }
-                }
-                if (o_skin4 || o_skin2) { LOGI("skin hook ready"); break; }
+                LOGI("skin hooks installed: %d/%d", n, kSkinCount);
                 break;
             }
             usleep(100000);
