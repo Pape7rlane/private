@@ -332,6 +332,9 @@ struct Patch {
     // vbpos 替换
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
+    std::vector<uint32_t> dynMap;
+    std::vector<float>    dynBase;
+    std::vector<uint8_t>  dynBuf;
     // vbmod: 全属性替换
     int         perm = 0;
     float       scale = 1.0f;
@@ -977,7 +980,42 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
         if (pt.action == 17) {
             if (pt.done) {
-                if (pt.glBuf) { g_vbBinds.clear(); VbBind vb; vb.idx = pt.dynPosAttr; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+                if (!pt.glBuf) continue;
+                // 每帧: 读当前安卓顶点, 把位移传给 mod 顶点
+                LiveAttr lb[16];
+                capture_vao(lb);
+                const int pp = pt.dynPosAttr;
+                if (pp < 0 || pp >= 16 || !lb[pp].enabled || !o_glMapBufferRange) {
+                    g_vbBinds.clear(); VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb);
+                    continue;
+                }
+                const LiveAttr& aa = lb[pp];
+                const size_t oo = (size_t)(uintptr_t)aa.ptr;
+                const size_t need = oo + (size_t)pt.dynRef.size() / 3 * (size_t)aa.stride;
+                if (need <= (16u << 20) && aa.buf) {
+                    GLuint sv = g_curArray;
+                    o_glBindBuffer(GL_ARRAY_BUFFER, aa.buf);
+                    void* mp2 = o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)need, GL_MAP_READ_BIT);
+                    if (mp2) {
+                        const uint8_t* nw = (const uint8_t*)mp2;
+                        size_t cnt = pt.dynMap.size();
+                        for (size_t v = 0; v < cnt; v++) {
+                            uint32_t ri = pt.dynMap[v];
+                            const float* cur3 = (const float*)(nw + oo + (size_t)ri * (size_t)aa.stride);
+                            float* dst = (float*)(pt.dynBuf.data() + oo + v * (size_t)aa.stride);
+                            dst[0] = pt.dynBase[v*3+0] + (cur3[0] - pt.dynRef[ri*3+0]);
+                            dst[1] = pt.dynBase[v*3+1] + (cur3[1] - pt.dynRef[ri*3+1]);
+                            dst[2] = pt.dynBase[v*3+2] + (cur3[2] - pt.dynRef[ri*3+2]);
+                        }
+                        if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
+                        if (o_glBufferSubData) {
+                            o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
+                            o_glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)pt.dynBuf.size(), pt.dynBuf.data());
+                        }
+                    }
+                    o_glBindBuffer(GL_ARRAY_BUFFER, sv);
+                }
+                g_vbBinds.clear(); VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb);
                 continue;
             }
             LiveAttr la[16];
@@ -1046,10 +1084,61 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 dst[1] = mv[v*3+1] * sc + offY;
                 dst[2] = mv[v*3+2] * sc + offZ;
             }
+            // 最近邻映射: mod 顶点 -> 安卓参考顶点
+            const float CELL = 0.06f;
+            std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+            auto cellkey = [&](float x, float y, float z) -> uint64_t {
+                int ix = (int)floorf((x - rmin[0]) / CELL);
+                int iy = (int)floorf((y - rmin[1]) / CELL);
+                int iz = (int)floorf((z - rmin[2]) / CELL);
+                if (ix < 0) ix = 0; if (iy < 0) iy = 0; if (iz < 0) iz = 0;
+                if (ix > 1023) ix = 1023; if (iy > 1023) iy = 1023; if (iz > 1023) iz = 1023;
+                return ((uint64_t)ix << 20) | ((uint64_t)iy << 10) | (uint64_t)iz;
+            };
+            pt.dynRef.assign((size_t)vcount * 3, 0.0f);
+            for (uint32_t v = 0; v < vcount; v++) {
+                const float* p = (const float*)(cur.data() + off + (size_t)v * (size_t)a.stride);
+                pt.dynRef[v*3+0] = p[0]; pt.dynRef[v*3+1] = p[1]; pt.dynRef[v*3+2] = p[2];
+                grid[cellkey(p[0], p[1], p[2])].push_back(v);
+            }
+            pt.dynMap.assign(n, 0);
+            size_t miss = 0;
+            for (size_t v = 0; v < n; v++) {
+                const float* q = &mv[v*3];
+                float qx = (q[0] - mmin[0]) * sc + rmin[0];
+                float qy = q[1] * sc + offY;
+                float qz = q[2] * sc + offZ;
+                int cx = (int)floorf((qx - rmin[0]) / CELL);
+                int cy = (int)floorf((qy - rmin[1]) / CELL);
+                int cz = (int)floorf((qz - rmin[2]) / CELL);
+                float best = 1e30f; uint32_t bi = 0; bool ok = false;
+                for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 2; dy++) for (int dz = -2; dz <= 2; dz++) {
+                    int ix = cx+dx, iy = cy+dy, iz = cz+dz;
+                    if (ix < 0 || iy < 0 || iz < 0 || ix > 1023 || iy > 1023 || iz > 1023) continue;
+                    uint64_t k = ((uint64_t)ix << 20) | ((uint64_t)iy << 10) | (uint64_t)iz;
+                    auto git = grid.find(k);
+                    if (git == grid.end()) continue;
+                    for (uint32_t ri : git->second) {
+                        float ddx = pt.dynRef[ri*3+0]-qx, ddy = pt.dynRef[ri*3+1]-qy, ddz = pt.dynRef[ri*3+2]-qz;
+                        float d2 = ddx*ddx + ddy*ddy + ddz*ddz;
+                        if (d2 < best) { best = d2; bi = ri; ok = true; }
+                    }
+                }
+                if (!ok) miss++;
+                pt.dynMap[v] = bi;
+            }
+            LOGI("vbstatic nn map done: %zu verts, %zu unmatched", n, miss);
+
             o_glGenBuffers(1, &pt.glBuf);
             o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
             o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)outb.size(), outb.data(), GL_DYNAMIC_DRAW);
             o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
+            pt.dynBuf = outb;
+            pt.dynBase.assign(n * 3, 0.0f);
+            for (size_t v = 0; v < n; v++) {
+                const float* d = (const float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
+                pt.dynBase[v*3+0] = d[0]; pt.dynBase[v*3+1] = d[1]; pt.dynBase[v*3+2] = d[2];
+            }
             LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
             g_vbBinds.clear();
             { VbBind vb; vb.idx = pos; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
