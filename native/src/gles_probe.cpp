@@ -776,6 +776,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
         if (pt.action == 16) {
             if (pt.done) continue;
+            if (pt.hits++ < 3000) continue;
             pt.done = true;
             LOGI("IBLIST %zu cached", g_bufs.size());
             for (auto& kv : g_bufs) {
