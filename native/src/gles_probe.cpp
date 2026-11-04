@@ -45,6 +45,9 @@ PFNDLSYM                o_dlsym            = nullptr;
 
 char g_dir[512] = {0};
 
+struct TexOv { int w = 0, h = 0; std::vector<uint8_t> rgba; };
+bool load_dds(const char* path, TexOv& out);
+
 // ---------------------------------------------------------------- 状态
 
 struct Attr { bool has=false; GLint size=0; GLenum type=0; GLsizei stride=0; GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
@@ -630,7 +633,6 @@ GLsizei g_overrideCount = 0;
 GLenum g_overrideType = GL_UNSIGNED_SHORT;
 
 // ---------------------------------------------------------------- 纹理替换
-struct TexOv { int w = 0, h = 0; std::vector<uint8_t> rgba; };
 std::unordered_map<GLuint, TexOv> g_texOv;
 std::unordered_set<GLuint> g_texDone;
 GLuint g_tex2D = 0;
