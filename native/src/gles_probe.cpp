@@ -335,6 +335,7 @@ struct Patch {
     // vbpos 替换
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
+    std::vector<std::pair<int,GLuint>> uvBinds;
     std::vector<uint8_t>  dds;
     int ddsW = 0, ddsH = 0;
     std::vector<uint32_t> dynMap;
@@ -1064,7 +1065,9 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 capture_vao(lb);
                 const int pp = pt.dynPosAttr;
                 if (pp < 0 || pp >= 16 || !lb[pp].enabled || !o_glMapBufferRange) {
-                    g_vbBinds.clear(); VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb);
+                    g_vbBinds.clear();
+                    for (auto& uv : pt.uvBinds) { VbBind vb; vb.idx = uv.first; vb.newBuf = uv.second; g_vbBinds.push_back(vb); }
+                    { VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
                     continue;
                 }
                 const LiveAttr& aa = lb[pp];
@@ -1093,7 +1096,9 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     }
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
                 }
-                g_vbBinds.clear(); VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb);
+                g_vbBinds.clear();
+                for (auto& uv : pt.uvBinds) { VbBind vb; vb.idx = uv.first; vb.newBuf = uv.second; g_vbBinds.push_back(vb); }
+                { VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
                 continue;
             }
             LiveAttr la[16];
@@ -1286,7 +1291,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     o_glBindBuffer(GL_ARRAY_BUFFER, nub);
                     o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)ub.size(), ub.data(), GL_STATIC_DRAW);
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
-                    g_vbBinds.push_back({i, nub});
+                    pt.uvBinds.push_back({i, nub});
                     LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u", i, uoff, la[i].stride, cnt, nub);
                 }
             }
