@@ -1017,6 +1017,13 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
         }
         if (pt.action == 14) {
             if (!pt.done) {
+                // 只在有 UV 的主渲染 pass 上报告
+                LiveAttr lc[16];
+                capture_vao(lc);
+                int uvN = 0;
+                for (int i = 0; i < 16; i++)
+                    if (lc[i].enabled && lc[i].size == 2 && lc[i].type == GL_FLOAT) uvN++;
+                if (!uvN) continue;
                 pt.done = true;
                 typedef void (*PFNGETTEX)(GLenum, GLint, GLenum, GLint*);
                 static PFNGETTEX pg = nullptr;
