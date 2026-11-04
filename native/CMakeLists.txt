@@ -17,4 +17,5 @@ add_subdirectory(third_party/Dobby dobby_build)
 
 add_library(hsrprobe SHARED src/vk_probe.cpp src/gles_probe.cpp src/il2cpp_probe.cpp)
 target_compile_options(hsrprobe PRIVATE -O2 -fvisibility=hidden -Wall -Wno-unused-parameter)
+target_include_directories(hsrprobe PRIVATE third_party)
 target_link_libraries(hsrprobe PRIVATE dobby_static log android)

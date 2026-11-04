@@ -21,6 +21,7 @@
 #include <GLES3/gl3.h>
 
 #include "dobby.h"
+#include "bcdec.h"
 
 #define TAG "hsrprobe"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -414,6 +415,16 @@ void load_patches() {
             if (n < 2) continue;
             pt.action = 11;
             pt.hash = strtoull(a1, nullptr, 16);
+        } else if (!strcmp(cmd, "tex")) {
+            if (n < 3) continue;
+            pt.action = 13;
+            pt.hash = strtoull(a1, nullptr, 16);
+            pt.file = a2;
+            LOGI("patch tex hash=%08llx file=%s", (unsigned long long)pt.hash, pt.file.c_str());
+        } else if (!strcmp(cmd, "texstat")) {
+            if (n < 2) continue;
+            pt.action = 14;
+            pt.hash = strtoull(a1, nullptr, 16);
         } else if (!strcmp(cmd, "vbmod") || !strcmp(cmd, "vbmoddyn")) {
             // vbmod <ibhash> <posfile> <blendfile> <texfile>
             if (n < 5) continue;
@@ -550,6 +561,73 @@ void dump_stats() {
 GLuint g_overrideBuf = 0;
 GLsizei g_overrideCount = 0;
 GLenum g_overrideType = GL_UNSIGNED_SHORT;
+
+// ---------------------------------------------------------------- 纹理替换
+struct TexOv { int w = 0, h = 0; std::vector<uint8_t> rgba; };
+std::unordered_map<GLuint, TexOv> g_texOv;
+std::unordered_set<GLuint> g_texDone;
+GLuint g_tex2D = 0;
+
+decltype(&glBindTexture)  o_glBindTexture  = nullptr;
+decltype(&glActiveTexture) o_glActiveTexture = nullptr;
+decltype(&glTexImage2D)   o_glTexImage2D   = nullptr;
+
+void upload_tex(GLuint id) {
+    if (!id || !o_glTexImage2D) return;
+    auto it = g_texOv.find(id);
+    if (it == g_texOv.end()) return;
+    if (g_texDone.count(id)) return;
+    o_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, it->second.w, it->second.h, 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, it->second.rgba.data());
+    g_texDone.insert(id);
+    LOGI("tex upload id=%u %dx%d", id, it->second.w, it->second.h);
+}
+
+void glActiveTexture_hook(GLenum unit) {
+    if (!o_glActiveTexture) o_glActiveTexture = (decltype(&glActiveTexture))gl_real("glActiveTexture");
+    if (o_glActiveTexture) o_glActiveTexture(unit);
+}
+
+void glBindTexture_hook(GLenum target, GLuint tex) {
+    if (!o_glBindTexture) o_glBindTexture = (decltype(&glBindTexture))gl_real("glBindTexture");
+    if (!o_glBindTexture) return;
+    o_glBindTexture(target, tex);
+    if (target == GL_TEXTURE_2D) { g_tex2D = tex; upload_tex(tex); }
+}
+
+bool load_dds(const char* path, TexOv& out) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t hdr[148];
+    if (fread(hdr, 1, 148, f) != 148) { fclose(f); return false; }
+    if (memcmp(hdr, "DDS ", 4) != 0) { fclose(f); return false; }
+    uint32_t hh = *(uint32_t*)(hdr + 12);
+    uint32_t ww = *(uint32_t*)(hdr + 16);
+    uint32_t dxgi = *(uint32_t*)(hdr + 128);
+    if (!ww || !hh || ww > 4096 || hh > 4096) { fclose(f); return false; }
+    size_t blocks = (size_t)(ww / 4) * (size_t)(hh / 4);
+    size_t bsize = (dxgi == 77 || dxgi == 78) ? 16 : 16;
+    std::vector<uint8_t> src(blocks * bsize);
+    size_t got = fread(src.data(), 1, src.size(), f);
+    fclose(f);
+    if (got != src.size()) return false;
+    out.w = (int)ww; out.h = (int)hh;
+    out.rgba.assign((size_t)ww * hh * 4, 0);
+    for (uint32_t by = 0; by < hh / 4; by++) {
+        for (uint32_t bx = 0; bx < ww / 4; bx++) {
+            uint8_t blk[64];
+            const uint8_t* cp = src.data() + ((size_t)by * (ww / 4) + bx) * bsize;
+            if (dxgi == 98 || dxgi == 99) bcdec_bc7(cp, blk, 16);
+            else if (dxgi == 77 || dxgi == 78) bcdec_bc3(cp, blk, 16);
+            else if (dxgi == 71 || dxgi == 72) bcdec_bc1(cp, blk, 16);
+            else { return false; }
+            for (int y = 0; y < 4; y++) {
+                memcpy(out.rgba.data() + (((size_t)(by * 4 + y)) * ww + bx * 4) * 4, blk + y * 16, 16);
+            }
+        }
+    }
+    return true;
+}
 
 struct LiveAttr { bool enabled=false; GLint size=0; GLenum type=0; GLsizei stride=0;
                   GLuint buf=0; const void* ptr=nullptr; GLboolean norm=GL_FALSE; };
@@ -766,6 +844,40 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 o_glBindBuffer(GL_ARRAY_BUFFER, savedArr);
                 LOGI("  a%d sz=%d ty=%x st=%d ptr=%p buf=%u |%s",
                      i, la[i].size, la[i].type, la[i].stride, la[i].ptr, la[i].buf, line.c_str());
+            }
+            continue;
+        }
+        if (pt.action == 13) {
+            if (!pt.done) {
+                pt.done = true;
+                std::string fp = std::string(g_dir) + "/" + pt.file;
+                TexOv t;
+                if (load_dds(fp.c_str(), t)) {
+                    g_texOv[g_tex2D] = std::move(t);
+                    g_texDone.erase(g_tex2D);
+                    upload_tex(g_tex2D);
+                    LOGI("tex bind id=%u from %s", g_tex2D, pt.file.c_str());
+                } else {
+                    LOGE("tex load fail %s (id=%u)", fp.c_str(), g_tex2D);
+                }
+            }
+            continue;
+        }
+        if (pt.action == 14) {
+            if (!pt.done) {
+                pt.done = true;
+                typedef void (*PFNGETTEX)(GLenum, GLint, GLenum, GLint*);
+                static PFNGETTEX pg = nullptr;
+                if (!pg) pg = (PFNGETTEX)gl_real("glGetTexLevelParameteriv");
+                GLint w = 0, h = 0, fmt = 0;
+                if (pg && g_tex2D) {
+                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
+                    LOGI("TEXSTAT %08llx id=%u %dx%d fmt=0x%x", (unsigned long long)wh1, g_tex2D, w, h, fmt);
+                } else {
+                    LOGI("TEXSTAT %08llx no tex bound", (unsigned long long)wh1);
+                }
             }
             continue;
         }
@@ -1385,6 +1497,8 @@ struct Entry { const char* name; void* fn; void** tramp; };
 
 const Entry kEntries[] = {
     {"glBindBuffer",            (void*)&glBindBuffer_hook,            (void**)&o_glBindBuffer},
+    {"glBindTexture",           (void*)&glBindTexture_hook,           (void**)&o_glBindTexture},
+    {"glActiveTexture",         (void*)&glActiveTexture_hook,         (void**)&o_glActiveTexture},
     {"glBindVertexArray",       (void*)&glBindVertexArray_hook,       (void**)&o_glBindVertexArray},
     {"glGenBuffers",            (void*)&glGenBuffers_hook,            (void**)&o_glGenBuffers},
     {"glDeleteBuffers",         (void*)&glDeleteBuffers_hook,         (void**)&o_glDeleteBuffers},
