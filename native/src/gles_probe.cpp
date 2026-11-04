@@ -1322,7 +1322,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             if (pt.mode == 5) {
                 const float MC = 0.05f;
                 std::unordered_map<uint64_t, std::vector<uint32_t>> mgrid;
-                auto mkey = [](float x, float y, float z) -> uint64_t {
+                auto mkey = [MC](float x, float y, float z) -> uint64_t {
                     int ix=(int)floorf(x/MC), iy=(int)floorf(y/MC), iz=(int)floorf(z/MC);
                     if (ix<0)ix=0; if(iy<0)iy=0; if(iz<0)iz=0;
                     if (ix>1023)ix=1023; if(iy>1023)iy=1023; if(iz>1023)iz=1023;
