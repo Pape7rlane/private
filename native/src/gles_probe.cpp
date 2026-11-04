@@ -1292,6 +1292,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)ub.size(), ub.data(), GL_STATIC_DRAW);
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
                     pt.uvBinds.push_back({i, nub});
+                    { VbBind vb; vb.idx = i; vb.newBuf = nub; g_vbBinds.push_back(vb); }
                     LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u", i, uoff, la[i].stride, cnt, nub);
                 }
             }
