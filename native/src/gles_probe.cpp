@@ -21,6 +21,7 @@
 #include <GLES3/gl3.h>
 
 #include "dobby.h"
+#define BCDEC_IMPLEMENTATION
 #include "bcdec.h"
 
 #ifndef GL_TEXTURE_WIDTH
