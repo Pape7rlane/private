@@ -380,8 +380,8 @@ void load_patches() {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         if (*s == '#' || *s == '\n' || *s == 0) continue;
-        char cmd[32] = {0}, a1[64] = {0}, a2[64] = {0}, a3[64] = {0}, a4[64] = {0}, a5[64] = {0};
-        int n = sscanf(s, "%31s %63s %63s %63s %63s %63s", cmd, a1, a2, a3, a4, a5);
+        char cmd[32] = {0}, a1[64] = {0}, a2[64] = {0}, a3[64] = {0}, a4[64] = {0}, a5[64] = {0}, a6[64] = {0}, a7[64] = {0};
+        int n = sscanf(s, "%31s %63s %63s %63s %63s %63s %63s %63s", cmd, a1, a2, a3, a4, a5, a6, a7);
         if (n < 1) continue;
         Patch pt;
         if (!strcmp(cmd, "skipall")) {
