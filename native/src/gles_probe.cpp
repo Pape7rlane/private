@@ -1261,7 +1261,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                         const float* sp = (const float*)(pt.blend.data() + v * 20 + srcOff);
                         float* dp = (float*)(ub.data() + uoff + v * (size_t)la[i].stride);
                         dp[0] = sp[0];
-                        dp[1] = 1.0f - sp[1];
+                        dp[1] = sp[1];
                     }
                     GLuint nub = 0;
                     o_glGenBuffers(1, &nub);
