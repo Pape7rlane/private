@@ -335,6 +335,7 @@ struct Patch {
     // vbpos 替换
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
+    int flipV = 0;
     std::vector<std::pair<int,GLuint>> uvBinds;
     std::vector<uint8_t>  dds;
     int ddsW = 0, ddsH = 0;
@@ -437,6 +438,7 @@ void load_patches() {
             pt.hash = strtoull(a1, nullptr, 16);
             pt.file = a2;
             pt.perm = (int)strtoul(a3, nullptr, 0);
+            if (n >= 7) pt.flipV = atoi(a6);
             if (n >= 6 && !strcmp(a5, "red")) {
                 pt.ddsW = 64; pt.ddsH = 64;
                 pt.dds.assign(64 * 64 * 4, 0);
@@ -1284,7 +1286,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                         const float* sp = (const float*)(pt.blend.data() + v * 20 + srcOff);
                         float* dp = (float*)(ub.data() + uoff + v * (size_t)la[i].stride);
                         dp[0] = sp[0];
-                        dp[1] = sp[1];
+                        dp[1] = pt.flipV ? (1.0f - sp[1]) : sp[1];
                     }
                     GLuint nub = 0;
                     o_glGenBuffers(1, &nub);
@@ -1293,7 +1295,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
                     pt.uvBinds.push_back({i, nub});
                     { VbBind vb; vb.idx = i; vb.newBuf = nub; g_vbBinds.push_back(vb); }
-                    LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u", i, uoff, la[i].stride, cnt, nub);
+                    LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u flipV=%d", i, uoff, la[i].stride, cnt, nub, pt.flipV);
                 }
             }
             { VbBind vb; vb.idx = pos; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
