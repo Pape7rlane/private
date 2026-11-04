@@ -336,6 +336,8 @@ struct Patch {
     uint32_t    srcStride = 0;
     uint32_t    srcOffset = 0;
     int flipV = 0;
+    int mode = 1;
+    float refCenter[3] = {0,0,0};
     std::vector<std::pair<int,GLuint>> uvBinds;
     std::vector<uint8_t>  dds;
     int ddsW = 0, ddsH = 0;
@@ -439,6 +441,7 @@ void load_patches() {
             pt.file = a2;
             pt.perm = (int)strtoul(a3, nullptr, 0);
             if (n >= 7) pt.flipV = atoi(a6);
+            if (n >= 8) pt.mode = atoi(a7);
             if (n >= 6 && !strcmp(a5, "red")) {
                 pt.ddsW = 64; pt.ddsH = 64;
                 pt.dds.assign(64 * 64 * 4, 0);
@@ -1082,6 +1085,22 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     if (mp2) {
                         const uint8_t* nw = (const uint8_t*)mp2;
                         size_t cnt = pt.dynMap.size();
+                        if (pt.mode == 2) {
+                            size_t nvc = pt.dynRef.size() / 3;
+                            float cx = 0, cy = 0, cz = 0;
+                            for (size_t v = 0; v < nvc; v++) {
+                                const float* p = (const float*)(nw + oo + v * (size_t)aa.stride);
+                                cx += p[0]; cy += p[1]; cz += p[2];
+                            }
+                            if (nvc) { cx /= nvc; cy /= nvc; cz /= nvc; }
+                            float dx = cx - pt.refCenter[0], dy = cy - pt.refCenter[1], dz = cz - pt.refCenter[2];
+                            for (size_t v = 0; v < cnt; v++) {
+                                float* dst = (float*)(pt.dynBuf.data() + oo + v * (size_t)aa.stride);
+                                dst[0] = pt.dynBase[v*3+0] + dx;
+                                dst[1] = pt.dynBase[v*3+1] + dy;
+                                dst[2] = pt.dynBase[v*3+2] + dz;
+                            }
+                        } else
                         for (size_t v = 0; v < cnt; v++) {
                             uint32_t ri = pt.dynMap[v];
                             const float* cur3 = (const float*)(nw + oo + (size_t)ri * (size_t)aa.stride);
@@ -1220,6 +1239,17 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.dynMap[v] = bi;
             }
             LOGI("vbstatic nn map done: %zu verts, %zu unmatched", n, miss);
+            pt.refCenter[0] = pt.refCenter[1] = pt.refCenter[2] = 0.0f;
+            {
+                size_t cntr = 0;
+                for (uint32_t v = 0; v < vcount; v++) {
+                    const float* p = (const float*)(cur.data() + off + (size_t)v * (size_t)a.stride);
+                    pt.refCenter[0] += p[0]; pt.refCenter[1] += p[1]; pt.refCenter[2] += p[2];
+                    cntr++;
+                }
+                if (cntr) { pt.refCenter[0] /= cntr; pt.refCenter[1] /= cntr; pt.refCenter[2] /= cntr; }
+                LOGI("vbstatic ref center %.3f %.3f %.3f", pt.refCenter[0], pt.refCenter[1], pt.refCenter[2]);
+            }
 
             o_glGenBuffers(1, &pt.glBuf);
             o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
