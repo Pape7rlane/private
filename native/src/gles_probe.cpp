@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -2217,20 +2218,31 @@ void gles_probe_start(const char* out_dir) {
     }
 
     // 4) Unity CPU 蒙皮: 抓骨骼矩阵
-    void* uni = dlopen("libunity.so", RTLD_NOW | RTLD_LOCAL);
-    if (uni) {
-        void* t4 = dlsym(uni, "_s_SkinVertices4Bones_NEON");
-        if (t4) {
-            int rc = DobbyHook(t4, (void*)&on_skin4, (void**)&o_skin4);
-            if (rc == 0 && o_skin4) LOGI("hooked skin4 @ %p", t4);
-            else LOGE("DobbyHook skin4 failed rc=%d", rc);
-        } else LOGW("no _s_SkinVertices4Bones_NEON");
-        void* t2 = dlsym(uni, "_s_SkinVertices2Bones_NEON");
-        if (t2) {
-            int rc = DobbyHook(t2, (void*)&on_skin2, (void**)&o_skin2);
-            if (rc == 0 && o_skin2) LOGI("hooked skin2 @ %p", t2);
-            else LOGE("DobbyHook skin2 failed rc=%d", rc);
-        } else LOGW("no _s_SkinVertices2Bones_NEON");
-    } else LOGE("dlopen libunity.so failed");
+    // libunity.so 是游戏自己 dlopen 的, 注入时还没加载, 起线程等它出现。
+    std::thread([] {
+        for (int i = 0; i < 1800; i++) {
+            void* uni = dlopen("libunity.so", RTLD_NOLOAD | RTLD_NOW);
+            if (uni) {
+                if (!o_skin4) {
+                    void* t4 = dlsym(uni, "_s_SkinVertices4Bones_NEON");
+                    if (t4) {
+                        int rc = DobbyHook(t4, (void*)&on_skin4, (void**)&o_skin4);
+                        if (rc == 0 && o_skin4) LOGI("hooked skin4 @ %p", t4);
+                        else LOGE("DobbyHook skin4 failed rc=%d", rc);
+                    }
+                }
+                if (!o_skin2) {
+                    void* t2 = dlsym(uni, "_s_SkinVertices2Bones_NEON");
+                    if (t2) {
+                        int rc = DobbyHook(t2, (void*)&on_skin2, (void**)&o_skin2);
+                        if (rc == 0 && o_skin2) LOGI("hooked skin2 @ %p", t2);
+                        else LOGE("DobbyHook skin2 failed rc=%d", rc);
+                    }
+                }
+                if (o_skin4 || o_skin2) { LOGI("skin hook ready"); break; }
+            }
+            usleep(100000);
+        }
+    }).detach();
 }
 
