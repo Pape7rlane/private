@@ -422,6 +422,19 @@ void load_patches() {
             if (n < 2) continue;
             pt.action = 11;
             pt.hash = strtoull(a1, nullptr, 16);
+        } else if (!strcmp(cmd, "ibfind")) {
+            // ibfind <file>  — 用文件前 64 字节在所有已缓存的 IB 里找匹配
+            if (n < 2) continue;
+            pt.action = 15;
+            pt.file = a1;
+            std::string fp = std::string(g_dir) + "/" + pt.file;
+            FILE* vf = fopen(fp.c_str(), "rb");
+            if (!vf) { LOGE("ibfind: cannot open %s", fp.c_str()); continue; }
+            pt.ib.resize(64);
+            size_t got = fread(pt.ib.data(), 1, 64, vf);
+            fclose(vf);
+            pt.ib.resize(got);
+            LOGI("ibfind: loaded %zu bytes from %s", got, pt.file.c_str());
         } else if (!strcmp(cmd, "tex")) {
             if (n < 3) continue;
             pt.action = 13;
@@ -859,6 +872,25 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("  a%d sz=%d ty=%x st=%d ptr=%p buf=%u |%s",
                      i, la[i].size, la[i].type, la[i].stride, la[i].ptr, la[i].buf, line.c_str());
             }
+            continue;
+        }
+        if (pt.action == 15) {
+            if (pt.done) continue;
+            if (pt.ib.size() < 16) { pt.done = true; continue; }
+            size_t npre = pt.ib.size();
+            int found = 0;
+            for (auto& kv : g_bufs) {
+                const auto& bd = kv.second.data;
+                if (bd.size() < npre) continue;
+                if (memcmp(bd.data(), pt.ib.data(), npre) != 0) continue;
+                // 用整段重新算 hash 并打印
+                uint32_t hh = buffer_hash(bd.data(), bd.size(), 0x2);
+                LOGI("IBFIND %s -> buf=%u size=%zu hash=%08x target=%x", pt.file.c_str(),
+                     kv.first, bd.size(), hh, kv.second.target);
+                found++;
+            }
+            LOGI("IBFIND %s done, %d match(es), cached bufs=%zu", pt.file.c_str(), found, g_bufs.size());
+            pt.done = true;
             continue;
         }
         if (pt.action == 13) {
