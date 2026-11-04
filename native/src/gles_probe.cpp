@@ -1043,6 +1043,13 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 for (size_t k = 0; k < in; k++) if ((uint32_t)ip[k] + 1u > vcount) vcount = (uint32_t)ip[k] + 1u;
             }
             if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
+            // 只在主渲染 pass 上初始化: 必须有 UV 属性
+            if (!pt.blend.empty()) {
+                int uvCnt = 0;
+                for (int i = 0; i < 16; i++)
+                    if (la[i].enabled && la[i].size == 2 && la[i].type == GL_FLOAT) uvCnt++;
+                if (!uvCnt) continue;
+            }
             pt.done = true;
             pt.dynPosAttr = pos;
             const LiveAttr& a = la[pos];
