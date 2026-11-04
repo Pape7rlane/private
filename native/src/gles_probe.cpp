@@ -772,6 +772,25 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             if (count >= (GLsizei)pt.first && count <= (GLsizei)pt.cnt) { c_skipped++; skip = true; }
             continue;
         }
+        if (pt.action == 15) {
+            if (pt.done) continue;
+            if (pt.ib.size() < 16) { pt.done = true; continue; }
+            size_t npre = pt.ib.size();
+            int found = 0;
+            for (auto& kv : g_bufs) {
+                const auto& bd = kv.second.data;
+                if (bd.size() < npre) continue;
+                if (memcmp(bd.data(), pt.ib.data(), npre) != 0) continue;
+                // 用整段重新算 hash 并打印
+                uint32_t hh = buffer_hash(bd.data(), bd.size(), 0x2);
+                LOGI("IBFIND %s -> buf=%u size=%zu hash=%08x target=%x", pt.file.c_str(),
+                     kv.first, bd.size(), hh, kv.second.target);
+                found++;
+            }
+            LOGI("IBFIND %s done, %d match(es), cached bufs=%zu", pt.file.c_str(), found, g_bufs.size());
+            pt.done = true;
+            continue;
+        }
         if (!wh1 || pt.hash != wh1) continue;
         if (pt.hasFirst && first != pt.first) continue;
         if (pt.hasCnt && (uint32_t)count != pt.cnt) continue;
@@ -872,25 +891,6 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("  a%d sz=%d ty=%x st=%d ptr=%p buf=%u |%s",
                      i, la[i].size, la[i].type, la[i].stride, la[i].ptr, la[i].buf, line.c_str());
             }
-            continue;
-        }
-        if (pt.action == 15) {
-            if (pt.done) continue;
-            if (pt.ib.size() < 16) { pt.done = true; continue; }
-            size_t npre = pt.ib.size();
-            int found = 0;
-            for (auto& kv : g_bufs) {
-                const auto& bd = kv.second.data;
-                if (bd.size() < npre) continue;
-                if (memcmp(bd.data(), pt.ib.data(), npre) != 0) continue;
-                // 用整段重新算 hash 并打印
-                uint32_t hh = buffer_hash(bd.data(), bd.size(), 0x2);
-                LOGI("IBFIND %s -> buf=%u size=%zu hash=%08x target=%x", pt.file.c_str(),
-                     kv.first, bd.size(), hh, kv.second.target);
-                found++;
-            }
-            LOGI("IBFIND %s done, %d match(es), cached bufs=%zu", pt.file.c_str(), found, g_bufs.size());
-            pt.done = true;
             continue;
         }
         if (pt.action == 13) {
