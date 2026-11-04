@@ -106,8 +106,10 @@ hash = crc32c(hash, &D3D11_BUFFER_DESC, 24);
 2. **A-pose → 待机姿势**
    mod 的 `Position.buf` 是 A-pose（手臂向下斜张约 45°），PC 端靠 GPU 蒙皮实时驱动；安卓是 CPU 蒙皮，骨骼矩阵不外露，没法复用 mod 的 blend 权重。
    现在的「位移传递」只能平移，处理不了手臂下垂这种大角度旋转。
-   正在试的方案：**逐顶点局部刚体拟合**（shape matching）—— 对每个 mod 顶点取 K 个最近邻，用「mod 邻域 → 安卓邻域」的对应关系做 Horn 四元数拟合，把 A-pose 一次性掰成参考姿势，之后仍然走位移传递。
-   离线 Python 验证的第一版效果不理想（拟合权重没调好，个别顶点被拉飞），正在改。
+   已实现的方案：**`mode=5` 逐顶点局部刚体拟合**（shape matching）——
+   对每个 mod 顶点取 K=8 个 mod 空间最近邻，用它们各自的安卓最近邻构造对应点对，做 Horn 四元数拟合，把 A-pose 一次性掰成参考姿势，之后仍然走位移传递。
+   实测日志：`vbstatic pose fit: N/14754 verts posed`。
+   要点：权重按 mod 空间距离衰减（`1/(1+400d²)`），并做了 ±10 的限幅，避免个别离群顶点被拉飞。
 
 3. **贴图「纸扎碎片」**
    红蓝条纹同时出现，说明**只有一部分材质层被换掉了**。身体这个 IB 有 4 段 draw，目前只对 `5212ce68` 整体生效，其余材质层仍采样原图集。
@@ -138,7 +140,10 @@ hash = crc32c(hash, &D3D11_BUFFER_DESC, 24);
 ib <ib_hash> <file.ib> [first] [count] [u16|u32]
 
 # 完整替换: 位置 + UV + 贴图，并跟随动作
-vbstatic <ib_hash> <Position.buf> <perm> [Texcoord.buf] [Diffuse.dds]
+vbstatic <ib_hash> <Position.buf> <perm> [Texcoord.buf] [Diffuse.dds|red] [flipV] [mode]
+#   perm: 1 = Y->X,X->Y,Z->Z   2 = Y->X,Z->Y,X->Z (三月七身体用 2)
+#   mode: 1 = 位移传递(默认)  2 = 只跟随整体平移  3 = 完全吸附到安卓
+#         4 = 65% 吸附 + 35% 原始形状   5 = 局部刚体姿势匹配 (把 A-pose 掰成待机姿势)
 
 # 只缩放顶点（调试）
 vbscale <ib_hash> <attr> <fx> [fy] [fz]
@@ -255,7 +260,7 @@ docs/re-findings.md           逆向勘察记录
 - [x] 贴图替换（BC7 → RGBA8）
 - [x] 顶点云离线分析（Python 点云渲染 + 横截面曲线，用来定轴向）
 - [ ] **修正轴向映射 perm=1**（当前最大 bug）
-- [ ] **A-pose → 参考姿势的局部刚体拟合**（shape matching）
+- [x] A-pose → 参考姿势的局部刚体拟合（`mode=5`，Horn 四元数 + KNN，待实机验证）
 - [ ] 4 段 draw 的贴图分层绑定（消除红蓝条纹）
 - [ ] 多部件匹配（头发 / 头部 / 配饰的独立 IB hash 或软特征）
 - [ ] ini 解析器，直接吃 PC mod 目录

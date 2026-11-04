@@ -833,6 +833,56 @@ void permute_xyz(const float* s, int perm, float* d) {
     }
 }
 
+
+// ---- 局部刚体拟合 (Horn 四元数法) ----
+// 给定 cnt 组对应点 A[i]->B[i] 与权重 W[i], 求最优旋转 R 和质心 ca/cb。
+static void fit_rigid(const float* A, const float* B, const float* W, int cnt,
+                      float R[9], float ca[3], float cb[3]) {
+    float sw = 0.0f;
+    for (int i = 0; i < cnt; i++) sw += W[i];
+    ca[0]=ca[1]=ca[2]=0.0f; cb[0]=cb[1]=cb[2]=0.0f;
+    if (sw <= 1e-6f) { for (int i=0;i<9;i++) R[i] = (i%4==0)?1.0f:0.0f; return; }
+    for (int i = 0; i < cnt; i++)
+        for (int c = 0; c < 3; c++) { ca[c] += W[i]*A[i*3+c]; cb[c] += W[i]*B[i*3+c]; }
+    for (int c = 0; c < 3; c++) { ca[c]/=sw; cb[c]/=sw; }
+    float S[9] = {0,0,0,0,0,0,0,0,0};
+    for (int i = 0; i < cnt; i++) {
+        float a0=A[i*3+0]-ca[0], a1=A[i*3+1]-ca[1], a2=A[i*3+2]-ca[2];
+        float b0=B[i*3+0]-cb[0], b1=B[i*3+1]-cb[1], b2=B[i*3+2]-cb[2];
+        float w=W[i];
+        S[0]+=w*a0*b0; S[1]+=w*a0*b1; S[2]+=w*a0*b2;
+        S[3]+=w*a1*b0; S[4]+=w*a1*b1; S[5]+=w*a1*b2;
+        S[6]+=w*a2*b0; S[7]+=w*a2*b1; S[8]+=w*a2*b2;
+    }
+    float Sxx=S[0],Sxy=S[1],Sxz=S[2],Syx=S[3],Syy=S[4],Syz=S[5],Szx=S[6],Szy=S[7],Szz=S[8];
+    float N[4][4] = {
+        {Sxx+Syy+Szz, Syz-Szy,     Szx-Sxz,     Sxy-Syx},
+        {Syz-Szy,     Sxx-Syy-Szz, Sxy+Syx,     Szx+Sxz},
+        {Szx-Sxz,     Sxy+Syx,    -Sxx+Syy-Szz, Syz+Szy},
+        {Sxy-Syx,     Szx+Sxz,     Syz+Szy,    -Sxx-Syy+Szz}
+    };
+    float shift = 0.0f;
+    for (int r = 0; r < 4; r++) {
+        float s = 0.0f; for (int c = 0; c < 4; c++) s += fabsf(N[r][c]);
+        if (s > shift) shift = s;
+    }
+    for (int r = 0; r < 4; r++) N[r][r] += shift;
+    float q[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    for (int it = 0; it < 40; it++) {
+        float nq[4];
+        for (int r = 0; r < 4; r++) {
+            float s = 0.0f; for (int c = 0; c < 4; c++) s += N[r][c]*q[c];
+            nq[r] = s;
+        }
+        float nrm = sqrtf(nq[0]*nq[0]+nq[1]*nq[1]+nq[2]*nq[2]+nq[3]*nq[3]);
+        if (nrm < 1e-12f) break;
+        for (int r = 0; r < 4; r++) q[r] = nq[r]/nrm;
+    }
+    float q0=q[0], qx=q[1], qy=q[2], qz=q[3];
+    R[0]=q0*q0+qx*qx-qy*qy-qz*qz; R[1]=2*(qx*qy-q0*qz);         R[2]=2*(qx*qz+q0*qy);
+    R[3]=2*(qx*qy+q0*qz);         R[4]=q0*q0-qx*qx+qy*qy-qz*qz; R[5]=2*(qy*qz-q0*qx);
+    R[6]=2*(qx*qz-q0*qy);         R[7]=2*(qy*qz+q0*qx);         R[8]=q0*q0-qx*qx-qy*qy+qz*qz;
+}
 int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basev = 0) {
     c_draw++;
     g_modTexActive = false;
@@ -1267,6 +1317,63 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("vbstatic ref center %.3f %.3f %.3f", pt.refCenter[0], pt.refCenter[1], pt.refCenter[2]);
             }
 
+            // mode=5: 用 mod 空间 KNN + 安卓最近邻做局部刚体拟合,
+            // 把 A-pose 一次性掰成安卓的参考姿势 (shape matching)。
+            if (pt.mode == 5) {
+                const float MC = 0.05f;
+                std::unordered_map<uint64_t, std::vector<uint32_t>> mgrid;
+                auto mkey = [](float x, float y, float z) -> uint64_t {
+                    int ix=(int)floorf(x/MC), iy=(int)floorf(y/MC), iz=(int)floorf(z/MC);
+                    if (ix<0)ix=0; if(iy<0)iy=0; if(iz<0)iz=0;
+                    if (ix>1023)ix=1023; if(iy>1023)iy=1023; if(iz>1023)iz=1023;
+                    return ((uint64_t)ix<<20)|((uint64_t)iy<<10)|(uint64_t)iz;
+                };
+                for (size_t v = 0; v < n; v++)
+                    mgrid[mkey(mv[v*3],mv[v*3+1],mv[v*3+2])].push_back((uint32_t)v);
+                const int K = 8;
+                std::vector<float> fA((size_t)K*3), fB((size_t)K*3), fW((size_t)K);
+                std::vector<std::pair<float,uint32_t>> cand;
+                size_t okCnt = 0;
+                for (size_t v = 0; v < n; v++) {
+                    float px=mv[v*3], py=mv[v*3+1], pz=mv[v*3+2];
+                    int cx=(int)floorf(px/MC), cy=(int)floorf(py/MC), cz=(int)floorf(pz/MC);
+                    cand.clear();
+                    for (int dx=-2;dx<=2;dx++) for (int dy=-2;dy<=2;dy++) for (int dz=-2;dz<=2;dz++) {
+                        int ix=cx+dx, iy=cy+dy, iz=cz+dz;
+                        if (ix<0||iy<0||iz<0||ix>1023||iy>1023||iz>1023) continue;
+                        auto g2 = mgrid.find(((uint64_t)ix<<20)|((uint64_t)iy<<10)|(uint64_t)iz);
+                        if (g2 == mgrid.end()) continue;
+                        for (uint32_t j : g2->second) {
+                            float ddx=mv[j*3]-px, ddy=mv[j*3+1]-py, ddz=mv[j*3+2]-pz;
+                            cand.push_back(std::make_pair(ddx*ddx+ddy*ddy+ddz*ddz, j));
+                        }
+                    }
+                    if (cand.size() < 4) continue;
+                    std::sort(cand.begin(), cand.end());
+                    int m = 0;
+                    for (size_t i = 0; i < cand.size() && m < K; i++) {
+                        uint32_t j = cand[i].second;
+                        uint32_t ri = pt.dynMap[j];
+                        fA[m*3+0]=mv[j*3]; fA[m*3+1]=mv[j*3+1]; fA[m*3+2]=mv[j*3+2];
+                        fB[m*3+0]=pt.dynRef[ri*3+0]; fB[m*3+1]=pt.dynRef[ri*3+1]; fB[m*3+2]=pt.dynRef[ri*3+2];
+                        float dd = sqrtf(cand[i].first);
+                        fW[m] = 1.0f/(1.0f + dd*dd*400.0f);
+                        m++;
+                    }
+                    if (m < 4) continue;
+                    float R9[9], ca[3], cb[3];
+                    fit_rigid(fA.data(), fB.data(), fW.data(), m, R9, ca, cb);
+                    float d0=mv[v*3]-ca[0], d1=mv[v*3+1]-ca[1], d2=mv[v*3+2]-ca[2];
+                    float nx=R9[0]*d0+R9[1]*d1+R9[2]*d2+cb[0];
+                    float ny=R9[3]*d0+R9[4]*d1+R9[5]*d2+cb[1];
+                    float nz=R9[6]*d0+R9[7]*d1+R9[8]*d2+cb[2];
+                    if (!(fabsf(nx)<10.0f && fabsf(ny)<10.0f && fabsf(nz)<10.0f)) continue;
+                    float* dst = (float*)(outb.data() + off + v*(size_t)a.stride);
+                    dst[0]=nx; dst[1]=ny; dst[2]=nz;
+                    okCnt++;
+                }
+                LOGI("vbstatic pose fit: %zu/%zu verts posed", okCnt, n);
+            }
             o_glGenBuffers(1, &pt.glBuf);
             o_glBindBuffer(GL_ARRAY_BUFFER, pt.glBuf);
             o_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)outb.size(), outb.data(), GL_DYNAMIC_DRAW);
