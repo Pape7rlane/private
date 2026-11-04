@@ -437,7 +437,6 @@ void load_patches() {
                 std::string df = std::string(g_dir) + "/" + a5;
                 TexOv t;
                 if (load_dds(df.c_str(), t)) {
-                    pt.dynBase.push_back(1.0f);
                     pt.ddsW = t.w; pt.ddsH = t.h;
                     pt.dds.assign(t.rgba.begin(), t.rgba.end());
                     LOGI("patch vbstatic dds=%s %dx%d", a5, t.w, t.h);
