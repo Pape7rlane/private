@@ -15,6 +15,7 @@
 #include <cmath>
 #include <chrono>
 #include <thread>
+#include <link.h>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -2117,6 +2118,67 @@ void* dlsym_hook(void* handle, const char* name) {
 }
 
 
+
+// ---- ELF 符号查找: 不走 dlopen, 直接遍历已加载的 so 手动解析 .dynsym ----
+// 游戏的 libunity.so 在独立 linker namespace 里, dlopen 名字找不到。
+static uint32_t gnu_hash_of(const char* s) {
+    uint32_t h = 5381;
+    for (const uint8_t* p = (const uint8_t*)s; *p; p++) h = (h * 33u) + *p;
+    return h;
+}
+
+static void* elf_sym(void* base, const char* name) {
+    ElfW(Ehdr)* eh = (ElfW(Ehdr)*)base;
+    if (!eh || memcmp(eh->e_ident, ELFMAG, 4) != 0) return nullptr;
+    ElfW(Phdr)* ph = (ElfW(Phdr)*)((char*)base + eh->e_phoff);
+    ElfW(Dyn)* dyn = nullptr;
+    for (int i = 0; i < eh->e_phnum; i++)
+        if (ph[i].p_type == PT_DYNAMIC) { dyn = (ElfW(Dyn)*)((char*)base + ph[i].p_vaddr); break; }
+    if (!dyn) return nullptr;
+    const char* strtab = nullptr;
+    ElfW(Sym)* symtab = nullptr;
+    const uint32_t* ghash = nullptr;
+    const uint32_t* shash = nullptr;
+    for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_STRTAB) strtab = (const char*)((char*)base + d->d_un.d_ptr);
+        else if (d->d_tag == DT_SYMTAB) symtab = (ElfW(Sym)*)((char*)base + d->d_un.d_ptr);
+        else if (d->d_tag == DT_GNU_HASH) ghash = (const uint32_t*)((char*)base + d->d_un.d_ptr);
+        else if (d->d_tag == DT_HASH) shash = (const uint32_t*)((char*)base + d->d_un.d_ptr);
+    }
+    if (!strtab || !symtab) return nullptr;
+    if (ghash) {
+        uint32_t nbuckets = ghash[0], symoff = ghash[1], bloom = ghash[2];
+        const uint32_t* buckets = &ghash[4 + bloom * 2];
+        const uint32_t* chain = buckets + nbuckets;
+        uint32_t h = gnu_hash_of(name);
+        uint32_t b = buckets[h % nbuckets];
+        if (b < symoff) return nullptr;
+        for (;;) {
+            uint32_t ch = chain[b - symoff];
+            if ((ch | 1u) == (h | 1u) && !strcmp(strtab + symtab[b].st_name, name))
+                return (void*)((char*)base + symtab[b].st_value);
+            if (ch & 1u) break;
+            b++;
+        }
+        return nullptr;
+    }
+    if (shash) {
+        uint32_t nchain = shash[1];
+        for (uint32_t i = 1; i < nchain; i++)
+            if (!strcmp(strtab + symtab[i].st_name, name))
+                return (void*)((char*)base + symtab[i].st_value);
+    }
+    return nullptr;
+}
+
+static void* g_unityBase = nullptr;
+static int find_unity_cb(struct dl_phdr_info* info, size_t, void*) {
+    if (info->dlpi_name && strstr(info->dlpi_name, "libunity.so")) {
+        g_unityBase = (void*)info->dlpi_addr;
+        return 1;
+    }
+    return 0;
+}
 // ---- Unity CPU 蒙皮 hook: 抓骨骼矩阵 ----
 // libunity.so 导出 _s_SkinVertices4Bones_NEON, 签名由反汇编得到:
 //   x0 = 骨骼矩阵数组 (每个 64 字节 4x4), x1 = 输入顶点 (24 字节/顶点),
@@ -2230,18 +2292,20 @@ void gles_probe_start(const char* out_dir) {
     // libunity.so 是游戏自己 dlopen 的, 注入时还没加载, 起线程等它出现。
     std::thread([] {
         for (int i = 0; i < 1800; i++) {
-            void* uni = dlopen("libunity.so", RTLD_NOLOAD | RTLD_NOW);
-            if (uni) {
+            g_unityBase = nullptr;
+            dl_iterate_phdr(find_unity_cb, nullptr);
+            if (g_unityBase) {
+                LOGI("libunity base=%p", g_unityBase);
                 if (!o_skin4) {
-                    void* t4 = dlsym(uni, "_s_SkinVertices4Bones_NEON");
+                    void* t4 = elf_sym(g_unityBase, "_s_SkinVertices4Bones_NEON");
                     if (t4) {
                         int rc = DobbyHook(t4, (void*)&on_skin4, (void**)&o_skin4);
                         if (rc == 0 && o_skin4) LOGI("hooked skin4 @ %p", t4);
                         else LOGE("DobbyHook skin4 failed rc=%d", rc);
-                    }
+                    } else LOGE("symbol _s_SkinVertices4Bones_NEON not found");
                 }
                 if (!o_skin2) {
-                    void* t2 = dlsym(uni, "_s_SkinVertices2Bones_NEON");
+                    void* t2 = elf_sym(g_unityBase, "_s_SkinVertices2Bones_NEON");
                     if (t2) {
                         int rc = DobbyHook(t2, (void*)&on_skin2, (void**)&o_skin2);
                         if (rc == 0 && o_skin2) LOGI("hooked skin2 @ %p", t2);
@@ -2249,6 +2313,7 @@ void gles_probe_start(const char* out_dir) {
                     }
                 }
                 if (o_skin4 || o_skin2) { LOGI("skin hook ready"); break; }
+                break;
             }
             usleep(100000);
         }
