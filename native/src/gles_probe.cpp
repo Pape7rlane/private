@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <cerrno>
 #include <atomic>
 #include <cstdint>
@@ -2127,14 +2128,22 @@ static SkinFn o_skin2 = nullptr;
 static std::atomic<int> g_skinN4{0};
 static std::atomic<int> g_skinN2{0};
 
+// 用 POSIX open/write, 不用 stdio: 蒙皮函数在 Unity 渲染线程里调用,
+// fopen/freopen 会触发 fdsan 的 fd 所有权检查直接 SIGABRT。
 static void dump_bytes(const char* name, const void* p, size_t n) {
     if (!g_dir[0] || !p || !n) return;
     char path[600];
     snprintf(path, sizeof(path), "%s/%s", g_dir, name);
-    FILE* f = fopen(path, "wb");
-    if (!f) { LOGE("dump open fail %s", path); return; }
-    fwrite(p, 1, n, f);
-    fclose(f);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) { LOGE("dump open fail %s errno=%d", path, errno); return; }
+    const uint8_t* q = (const uint8_t*)p;
+    size_t left = n;
+    while (left > 0) {
+        ssize_t w = write(fd, q, left);
+        if (w <= 0) break;
+        q += w; left -= (size_t)w;
+    }
+    close(fd);
     LOGI("dump %s %zu bytes", name, n);
 }
 
