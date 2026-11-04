@@ -1226,8 +1226,12 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     o_glBindTexture(GL_TEXTURE_2D, nt);
                     o_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pt.ddsW, pt.ddsH, 0,
                                    GL_RGBA, GL_UNSIGNED_BYTE, pt.dds.data());
+                    typedef void (*PFNGENMIP)(GLenum);
+                    static PFNGENMIP pmip = nullptr;
+                    if (!pmip) pmip = (PFNGENMIP)gl_real("glGenerateMipmap");
+                    if (pmip) pmip(GL_TEXTURE_2D);
                     if (pparam) {
-                        pparam(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        pparam(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
                         pparam(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                         pparam(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
                         pparam(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
