@@ -798,6 +798,17 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
 
             const size_t srcN = pt.ib.size() / 40;
             const size_t n = std::min((size_t)vcount, srcN);
+            if (pt.perm < 0) {
+                static std::chrono::steady_clock::time_point dlast;
+                auto dnow = std::chrono::steady_clock::now();
+                if (dlast.time_since_epoch().count() == 0) dlast = dnow;
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(dnow - dlast).count() >= 2500) {
+                    dlast = dnow;
+                    pt.perm = (pt.perm == -1) ? 0 : ((pt.perm + 1) % 6);
+                    pt.dynReady = false;
+                    LOGI("vbmoddyn CYCLE perm=%d", pt.perm);
+                }
+            }
             // Unity may orphan/reallocate the source VBO every frame.  A new
             // source buffer id is still the same skinned stream, so keep the
             // reference pose across buffer ids and only reset on layout/count changes.
