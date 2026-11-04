@@ -738,13 +738,15 @@ void capture_vao(LiveAttr out[16]) {
 GLuint g_modTex = 0;
 GLint  g_modTexPrev = 0;
 int    g_modTexUnit = 1;
+bool   g_modTexActive = false;
+bool   g_modTexBound = false;
 
 struct VbBind { int idx = -1; GLuint newBuf = 0; Attr saved; };
 std::vector<VbBind> g_vbBinds;
 GLuint g_vbSavedArray = 0;
 
 void apply_vb() {
-    if (g_modTex) {
+    if (g_modTex && g_modTexActive) {
         typedef void (*PFNACT)(GLenum);
         typedef void (*PFNBINDT)(GLenum, GLuint);
         typedef void (*PFNGETI)(GLenum, GLint*);
@@ -757,6 +759,7 @@ void apply_vb() {
             if (pgeti) { g_modTexPrev = 0; pgeti(GL_TEXTURE_BINDING_2D, &g_modTexPrev); }
             pbind(GL_TEXTURE_2D, g_modTex);
             pact(GL_TEXTURE0);
+            g_modTexBound = true;
         }
     }
     if (g_vbBinds.empty() || !o_glBindBuffer || !o_glVertexAttribPointer) return;
@@ -780,7 +783,7 @@ void apply_vb() {
 }
 
 void restore_vb() {
-    if (g_modTex) {
+    if (g_modTexBound) {
         typedef void (*PFNACT)(GLenum);
         typedef void (*PFNBINDT)(GLenum, GLuint);
         static PFNACT pact = nullptr; static PFNBINDT pbind = nullptr;
@@ -790,6 +793,7 @@ void restore_vb() {
             pact(GL_TEXTURE0 + g_modTexUnit);
             pbind(GL_TEXTURE_2D, (GLuint)g_modTexPrev);
             pact(GL_TEXTURE0);
+            g_modTexBound = false;
         }
     }
     if (g_vbBinds.empty()) return;
@@ -1037,6 +1041,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             continue;
         }
         if (pt.action == 17) {
+            g_modTexActive = true;
             if (pt.done) {
                 if (!pt.glBuf) continue;
                 // 每帧: 读当前安卓顶点, 把位移传给 mod 顶点
