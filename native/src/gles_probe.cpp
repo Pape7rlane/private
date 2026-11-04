@@ -798,12 +798,16 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             for (auto& kv : g_bufs) {
                 const auto& bd = kv.second.data;
                 if (bd.size() < npre) continue;
-                if (memcmp(bd.data(), pt.ib.data(), npre) != 0) continue;
-                // 用整段重新算 hash 并打印
-                uint32_t hh = buffer_hash(bd.data(), bd.size(), 0x2);
-                LOGI("IBFIND %s -> buf=%u size=%zu hash=%08x target=%x", pt.file.c_str(),
-                     kv.first, bd.size(), hh, kv.second.target);
-                found++;
+                // 子串搜索: 索引池里可能只取一段
+                for (size_t off = 0; off + npre <= bd.size(); off += 2) {
+                    if (bd[off] != pt.ib[0]) continue;
+                    if (memcmp(bd.data() + off, pt.ib.data(), npre) != 0) continue;
+                    uint32_t hh = buffer_hash(bd.data(), bd.size(), 0x2);
+                    LOGI("IBFIND %s -> buf=%u size=%zu off=%zu hash=%08x tgt=%x",
+                         pt.file.c_str(), kv.first, bd.size(), off, hh, kv.second.target);
+                    found++;
+                    break;
+                }
             }
             LOGI("IBFIND %s done, %d match(es), cached bufs=%zu", pt.file.c_str(), found, g_bufs.size());
             pt.done = true;
