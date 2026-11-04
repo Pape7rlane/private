@@ -1151,6 +1151,8 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 const float* d = (const float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
                 pt.dynBase[v*3+0] = d[0]; pt.dynBase[v*3+1] = d[1]; pt.dynBase[v*3+2] = d[2];
             }
+            LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
+            g_vbBinds.clear();
             // UV 替换: mod Texcoord stride 20 -> uv0@4, uv1@12
             if (!pt.blend.empty()) {
                 const size_t nuv = pt.blend.size() / 20;
@@ -1185,8 +1187,6 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u", i, uoff, la[i].stride, cnt, nub);
                 }
             }
-            LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
-            g_vbBinds.clear();
             { VbBind vb; vb.idx = pos; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
             continue;
         }
