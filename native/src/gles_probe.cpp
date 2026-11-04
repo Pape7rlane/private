@@ -23,6 +23,12 @@
 #include "dobby.h"
 #include "bcdec.h"
 
+#ifndef GL_TEXTURE_WIDTH
+#define GL_TEXTURE_WIDTH            0x1000
+#define GL_TEXTURE_HEIGHT           0x1001
+#define GL_TEXTURE_INTERNAL_FORMAT  0x1003
+#endif
+
 #define TAG "hsrprobe"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  TAG, __VA_ARGS__)
