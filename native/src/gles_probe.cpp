@@ -574,6 +574,8 @@ struct TexOv { int w = 0, h = 0; std::vector<uint8_t> rgba; };
 std::unordered_map<GLuint, TexOv> g_texOv;
 std::unordered_set<GLuint> g_texDone;
 GLuint g_tex2D = 0;
+GLuint g_texUnitCur = 0;
+GLuint g_texByUnit[8] = {0,0,0,0,0,0,0,0};
 
 decltype(&glBindTexture)  o_glBindTexture  = nullptr;
 decltype(&glActiveTexture) o_glActiveTexture = nullptr;
@@ -592,6 +594,7 @@ void upload_tex(GLuint id) {
 
 void glActiveTexture_hook(GLenum unit) {
     if (!o_glActiveTexture) o_glActiveTexture = (decltype(&glActiveTexture))gl_real("glActiveTexture");
+    if (unit >= GL_TEXTURE0 && unit < GL_TEXTURE0 + 8) g_texUnitCur = unit - GL_TEXTURE0;
     if (o_glActiveTexture) o_glActiveTexture(unit);
 }
 
@@ -599,7 +602,11 @@ void glBindTexture_hook(GLenum target, GLuint tex) {
     if (!o_glBindTexture) o_glBindTexture = (decltype(&glBindTexture))gl_real("glBindTexture");
     if (!o_glBindTexture) return;
     o_glBindTexture(target, tex);
-    if (target == GL_TEXTURE_2D) { g_tex2D = tex; upload_tex(tex); }
+    if (target == GL_TEXTURE_2D) {
+        g_tex2D = tex;
+        if (g_texUnitCur < 8) g_texByUnit[g_texUnitCur] = tex;
+        upload_tex(tex);
+    }
 }
 
 bool load_dds(const char* path, TexOv& out) {
@@ -876,14 +883,22 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 typedef void (*PFNGETTEX)(GLenum, GLint, GLenum, GLint*);
                 static PFNGETTEX pg = nullptr;
                 if (!pg) pg = (PFNGETTEX)gl_real("glGetTexLevelParameteriv");
-                GLint w = 0, h = 0, fmt = 0;
-                if (pg && g_tex2D) {
-                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
-                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-                    pg(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
-                    LOGI("TEXSTAT %08llx id=%u %dx%d fmt=0x%x", (unsigned long long)wh1, g_tex2D, w, h, fmt);
+                if (pg) {
+                    for (int u = 0; u < 6; u++) {
+                        GLuint id = g_texByUnit[u];
+                        if (!id) continue;
+                        if (!o_glBindTexture) break;
+                        o_glBindTexture(GL_TEXTURE_2D, id);
+                        GLint w = 0, h = 0, fmt = 0;
+                        pg(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+                        pg(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+                        pg(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
+                        LOGI("TEXSTAT %08llx unit=%d id=%u %dx%d fmt=0x%x",
+                             (unsigned long long)wh1, u, id, w, h, fmt);
+                    }
+                    o_glBindTexture(GL_TEXTURE_2D, g_tex2D);
                 } else {
-                    LOGI("TEXSTAT %08llx no tex bound", (unsigned long long)wh1);
+                    LOGI("TEXSTAT %08llx no query fn", (unsigned long long)wh1);
                 }
             }
             continue;
