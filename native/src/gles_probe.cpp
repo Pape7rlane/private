@@ -151,6 +151,7 @@ decltype(&glDeleteBuffers)   o_glDeleteBuffers   = nullptr;
 decltype(&glUseProgram)      o_glUseProgram      = nullptr;
 decltype(&glShaderSource)    o_glShaderSource    = nullptr;
 decltype(&glGetUniformLocation) o_glGetUniformLocation = nullptr;
+decltype(&glUniform1f)       o_glUniform1f       = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -296,6 +297,8 @@ void glShaderSource_hook(GLuint shader, GLsizei count, const GLchar* const* stri
 
 // ---- uniform 名字 dump: 渲染 shader 是预编译二进制, 只能靠 uniform 名字定位渐隐参数 ----
 std::unordered_set<std::string> g_uniDumped;
+// (program << 32) | location -> 名字, 供 glUniform1f 反查
+std::unordered_map<uint64_t, std::string> g_uniByLoc;
 
 GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     // RESOLVE 里的 return; 在非 void 函数里不合法, 这里手写解析
@@ -303,15 +306,35 @@ GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
         o_glGetUniformLocation = (decltype(o_glGetUniformLocation))gl_real("glGetUniformLocation");
     if (!o_glGetUniformLocation) { LOGE("no real glGetUniformLocation"); return -1; }
     GLint loc = o_glGetUniformLocation(program, name);
-    if (name && loc >= 0 && g_uniDumped.size() < 8000) {
+    if (name && loc >= 0) {
         std::string n(name);
-        if (g_uniDumped.insert(n).second) {
+        g_uniByLoc[((uint64_t)program << 32) | (uint32_t)loc] = n;
+        if (g_uniDumped.size() < 8000 && g_uniDumped.insert(n).second) {
             std::string path = std::string(g_dir) + "/uniforms.txt";
             FILE* f = fopen(path.c_str(), "a");
             if (f) { fprintf(f, "%s\t%d\t%u\n", n.c_str(), loc, program); fclose(f); }
         }
     }
     return loc;
+}
+
+// 角色近距离淡出: 崩铁用 dither 做渐隐, _OneMinusOpacityDitherScale 是它的强度.
+// 强制成 0 = 完全不透明, 角色不再随相机靠近而消失.
+static std::atomic<int> g_fadeLogs{0};
+
+void glUniform1f_hook(GLint location, GLfloat v0) {
+    if (!o_glUniform1f) o_glUniform1f = (decltype(o_glUniform1f))gl_real("glUniform1f");
+    if (!o_glUniform1f) return;
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end()) {
+        const std::string& n = it->second;
+        if (n == "_OneMinusOpacityDitherScale") {
+            if (g_fadeLogs.fetch_add(1) < 40)
+                LOGI("FADE %s prog=%u loc=%d val=%.4f -> 0", n.c_str(), g_curProg, location, v0);
+            v0 = 0.0f;
+        }
+    }
+    o_glUniform1f(location, v0);
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2266,6 +2289,7 @@ const Entry kEntries[] = {
     {"glUseProgram",            (void*)&glUseProgram_hook,            (void**)&o_glUseProgram},
     {"glShaderSource",          (void*)&glShaderSource_hook,          (void**)&o_glShaderSource},
     {"glGetUniformLocation",    (void*)&glGetUniformLocation_hook,    (void**)&o_glGetUniformLocation},
+    {"glUniform1f",             (void*)&glUniform1f_hook,             (void**)&o_glUniform1f},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
