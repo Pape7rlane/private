@@ -149,6 +149,7 @@ decltype(&glBufferSubData)   o_glBufferSubData   = nullptr;
 decltype(&glGenBuffers)      o_glGenBuffers      = nullptr;
 decltype(&glDeleteBuffers)   o_glDeleteBuffers   = nullptr;
 decltype(&glUseProgram)      o_glUseProgram      = nullptr;
+decltype(&glShaderSource)    o_glShaderSource    = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -259,6 +260,37 @@ void glUseProgram_hook(GLuint program) {
     c_useProg++;
     g_curProg = program;
     o_glUseProgram(program);
+}
+
+// ---- shader 源码 dump: 用来定位景深/后处理的 program ----
+std::unordered_set<GLuint> g_shaderDumped;
+std::atomic<int> g_shaderCount{0};
+
+void glShaderSource_hook(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* lengths) {
+    RESOLVE(o_glShaderSource, "glShaderSource");
+    if (strings && count > 0 && g_shaderDumped.find(shader) == g_shaderDumped.end()) {
+        std::string src;
+        for (GLsizei i = 0; i < count; i++) {
+            if (!strings[i]) continue;
+            if (lengths && lengths[i] >= 0) src.append(strings[i], (size_t)lengths[i]);
+            else src.append(strings[i]);
+        }
+        // 只收前 400 个, 单个不超过 256KB, 避免撑爆存储
+        if (!src.empty() && src.size() <= (256u << 10) && g_shaderCount.load() < 400) {
+            g_shaderDumped.insert(shader);
+            int idx = g_shaderCount.fetch_add(1);
+            std::string path = std::string(g_dir) + "/shaders.txt";
+            FILE* f = fopen(path.c_str(), "a");
+            if (f) {
+                fprintf(f, "\n===== SHADER %u idx=%d len=%zu =====\n", shader, idx, src.size());
+                fwrite(src.data(), 1, src.size(), f);
+                fprintf(f, "\n===== END %u =====\n", shader);
+                fclose(f);
+                LOGI("shader dump %u idx=%d len=%zu", shader, idx, src.size());
+            }
+        }
+    }
+    o_glShaderSource(shader, count, strings, lengths);
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2211,6 +2243,7 @@ const Entry kEntries[] = {
     {"glBufferData",            (void*)&glBufferData_hook,            (void**)&o_glBufferData},
     {"glBufferSubData",         (void*)&glBufferSubData_hook,         (void**)&o_glBufferSubData},
     {"glUseProgram",            (void*)&glUseProgram_hook,            (void**)&o_glUseProgram},
+    {"glShaderSource",          (void*)&glShaderSource_hook,          (void**)&o_glShaderSource},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
