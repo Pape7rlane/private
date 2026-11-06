@@ -1542,6 +1542,31 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                             ((float*)dp)[1] = uv[1];
                         }
                     }
+                    // 同一 buffer 里通常还塞着法线/切线(安卓把它们和 UV 交错在一起).
+                    // 只换 UV 会让法线停在原版顶点数上, 索引越界后光照全乱.
+                    // mod 的 Position.buf 布局: 位置(12) + 法线(12) + 切线(12) + 4
+                    for (int j = 0; j < 16; j++) {
+                        if (!la[j].enabled || j == i) continue;
+                        if (la[j].buf != la[i].buf || la[j].size < 3) continue;
+                        if (la[j].type != GL_UNSIGNED_BYTE && la[j].type != GL_BYTE) continue;
+                        const size_t jp = (size_t)(uintptr_t)la[j].ptr;
+                        if (jp + 3 > (size_t)la[j].stride) continue;
+                        // 法线排在 UV 前面, 切线排在后面
+                        const size_t nOff = (jp < uoff) ? 12 : 24;
+                        const bool sgn = (la[j].type == GL_BYTE);
+                        for (size_t v = 0; v < n; v++) {
+                            const float* nv = (const float*)(pt.ib.data() + v * 40 + nOff);
+                            uint8_t* dp = ub.data() + jp + v * (size_t)la[j].stride;
+                            for (int k = 0; k < 3; k++) {
+                                float t = nv[k];
+                                if (!(t > -1.0f)) t = -1.0f;
+                                if (t > 1.0f) t = 1.0f;
+                                dp[k] = sgn ? (uint8_t)(int8_t)(t * 127.0f)
+                                            : (uint8_t)((t * 0.5f + 0.5f) * 255.0f + 0.5f);
+                            }
+                        }
+                        LOGI("vbstatic normal attr%d off=%zu src=mod+%zu", j, jp, nOff);
+                    }
                     GLuint nub = 0;
                     o_glGenBuffers(1, &nub);
                     o_glBindBuffer(GL_ARRAY_BUFFER, nub);
