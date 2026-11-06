@@ -298,7 +298,10 @@ void glShaderSource_hook(GLuint shader, GLsizei count, const GLchar* const* stri
 std::unordered_set<std::string> g_uniDumped;
 
 GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
-    RESOLVE(o_glGetUniformLocation, "glGetUniformLocation");
+    // RESOLVE 里的 return; 在非 void 函数里不合法, 这里手写解析
+    if (!o_glGetUniformLocation)
+        o_glGetUniformLocation = (decltype(o_glGetUniformLocation))gl_real("glGetUniformLocation");
+    if (!o_glGetUniformLocation) { LOGE("no real glGetUniformLocation"); return -1; }
     GLint loc = o_glGetUniformLocation(program, name);
     if (name && loc >= 0 && g_uniDumped.size() < 8000) {
         std::string n(name);
