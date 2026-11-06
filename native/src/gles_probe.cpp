@@ -156,6 +156,15 @@ decltype(&glUniform1f)       o_glUniform1f       = nullptr;
 decltype(&glUniform4f)       o_glUniform4f       = nullptr;
 decltype(&glUniform1fv)      o_glUniform1fv      = nullptr;
 decltype(&glUniform4fv)      o_glUniform4fv      = nullptr;
+// GLES 3.1 的 DSA 版本, 有些引擎只走这条
+typedef void (*PFN_PU1F)(GLuint, GLint, GLfloat);
+typedef void (*PFN_PU1FV)(GLuint, GLint, GLsizei, const GLfloat*);
+typedef void (*PFN_PU4F)(GLuint, GLint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (*PFN_PU4FV)(GLuint, GLint, GLsizei, const GLfloat*);
+PFN_PU1F  o_glProgramUniform1f  = nullptr;
+PFN_PU1FV o_glProgramUniform1fv = nullptr;
+PFN_PU4F  o_glProgramUniform4f  = nullptr;
+PFN_PU4FV o_glProgramUniform4fv = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -333,9 +342,62 @@ GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     return loc;
 }
 
-// 角色近距离淡出: 崩铁用 dither 做渐隐, 真正随相机距离变化的是 _AlphaInside
-// (实测 prog=1019 从 1.0000 掉到 0.1180, 其余 _Alpha* 都是常量).
-// 开关打开时把 _AlphaInside 钉在 1.0, 角色就不再随相机贴近而消失.
+// 角色近距离淡出: 崩铁用的是 dither 抖动渐隐(画面上一块块的点阵), 不是 alpha 混合.
+// _AlphaInside 确实跟着相机距离变(1.0000 -> 0.1180), 但钉成 1 之后角色照样消失,
+// 说明它不是真正的开关. 现在同时盯 4 个候选, 并把每次值变化写进 unifade.txt:
+//   _OneMinusOpacityDitherScale  抖动强度, 0 = 不抖
+//   _DITHER_FADE_IN              淡入进度, 1 = 完全显示
+//   _MultiplyAlpha               整体 alpha 乘子
+//   _AlphaInside                 内侧 alpha
+
+static bool isFadeCand(const std::string& n) {
+    return n == "_OneMinusOpacityDitherScale" || n == "_DITHER_FADE_IN" ||
+           n == "_MultiplyAlpha" || n == "_AlphaInside";
+}
+
+// 让角色保持完全不透明时该用的值
+static bool fadeOpaque(const std::string& n, float& out) {
+    if (n == "_OneMinusOpacityDitherScale") { out = 0.0f; return true; }
+    if (n == "_DITHER_FADE_IN")             { out = 1.0f; return true; }
+    if (n == "_MultiplyAlpha")              { out = 1.0f; return true; }
+    if (n == "_AlphaInside")                { out = 1.0f; return true; }
+    return false;
+}
+
+// (prog,loc) -> 上次的值, 只有变化才落盘, 免得刷爆
+static std::unordered_map<uint64_t, float> g_fadeLast;
+static FILE* g_fadeFile = nullptr;
+static std::atomic<int> g_fadeLines{0};
+static std::atomic<int> g_fadeForceLogs{0};
+
+static void fadeTrace(uint64_t key, const std::string& n, GLuint prog, GLint loc, float v) {
+    auto it = g_fadeLast.find(key);
+    if (it != g_fadeLast.end() && fabsf(it->second - v) < 0.002f) return;
+    float old = (it == g_fadeLast.end()) ? -999.0f : it->second;
+    g_fadeLast[key] = v;
+    if (g_fadeLines.load() >= 6000) return;
+    g_fadeLines.fetch_add(1);
+    if (!g_fadeFile) {
+        std::string p = std::string(g_dir) + "/unifade.txt";
+        g_fadeFile = fopen(p.c_str(), "w");
+        if (g_fadeFile) setvbuf(g_fadeFile, nullptr, _IOLBF, 0);
+    }
+    if (g_fadeFile)
+        fprintf(g_fadeFile, "%s\tprog=%u\tloc=%d\t%.4f -> %.4f\n", n.c_str(), prog, loc, old, v);
+}
+
+// 统一的处理: 先记录, 开关打开就改成不透明值. 返回是否需要改写
+static bool fadeAdjust(const std::string& n, GLuint prog, GLint loc, float v, float& out) {
+    fadeTrace(((uint64_t)prog << 32) | (uint32_t)loc, n, prog, loc, v);
+    float t;
+    if (noFadeOn() && fadeOpaque(n, t)) {
+        if (g_fadeForceLogs.fetch_add(1) < 30)
+            LOGI("FADE %s prog=%u loc=%d %.4f -> %.2f", n.c_str(), prog, loc, v, t);
+        out = t;
+        return true;
+    }
+    return false;
+}
 
 void glUniform1f_hook(GLint location, GLfloat v0) {
     static std::atomic<long> g_u1f{0};
@@ -343,16 +405,10 @@ void glUniform1f_hook(GLint location, GLfloat v0) {
     if (c == 0) LOGI("U1F first call map=%zu prog=%u", g_uniByLoc.size(), g_curProg);
     if (!o_glUniform1f) o_glUniform1f = (decltype(o_glUniform1f))gl_real("glUniform1f");
     if (!o_glUniform1f) return;
-    if (noFadeOn()) {
-        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-        if (it != g_uniByLoc.end()) {
-            const std::string& n = it->second;
-            if (n == "_AlphaInside") {
-                if (g_fadeLogs.fetch_add(1) < 40)
-                    LOGI("FADE %s prog=%u loc=%d val=%.4f -> 1", n.c_str(), g_curProg, location, v0);
-                v0 = 1.0f;
-            }
-        }
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+        float t;
+        if (fadeAdjust(it->second, g_curProg, location, v0, t)) v0 = t;
     }
     o_glUniform1f(location, v0);
 }
@@ -360,13 +416,11 @@ void glUniform1f_hook(GLint location, GLfloat v0) {
 void glUniform4f_hook(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
     if (!o_glUniform4f) o_glUniform4f = (decltype(o_glUniform4f))gl_real("glUniform4f");
     if (!o_glUniform4f) return;
-    if (noFadeOn()) {
-        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
-            if (g_fadeLogs.fetch_add(1) < 80)
-                LOGI("FADE4 %s prog=%u loc=%d val=%.3f,%.3f,%.3f,%.3f",
-                     it->second.c_str(), g_curProg, location, v0, v1, v2, v3);
-            v0 = 1.0f; v1 = 1.0f; v2 = 1.0f; v3 = 1.0f;
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+        float t;
+        if (fadeAdjust(it->second, g_curProg, location, v0, t)) {
+            v0 = t; v1 = t; v2 = t; v3 = t;
         }
     }
     o_glUniform4f(location, v0, v1, v2, v3);
@@ -375,16 +429,16 @@ void glUniform4f_hook(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloa
 void glUniform1fv_hook(GLint location, GLsizei count, const GLfloat* value) {
     if (!o_glUniform1fv) o_glUniform1fv = (decltype(o_glUniform1fv))gl_real("glUniform1fv");
     if (!o_glUniform1fv) return;
-    if (noFadeOn() && value && count > 0) {
+    if (value && count > 0) {
         auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
-            if (g_fadeLogs.fetch_add(1) < 120)
-                LOGI("FADE1V %s prog=%u loc=%d cnt=%d v0=%.4f -> 1",
-                     it->second.c_str(), g_curProg, location, count, value[0]);
-            std::vector<GLfloat> tmp(value, value + count);
-            for (auto& t : tmp) t = 1.0f;
-            o_glUniform1fv(location, count, tmp.data());
-            return;
+        if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+            float t;
+            if (fadeAdjust(it->second, g_curProg, location, value[0], t)) {
+                std::vector<GLfloat> tmp(value, value + count);
+                for (auto& q : tmp) q = t;
+                o_glUniform1fv(location, count, tmp.data());
+                return;
+            }
         }
     }
     o_glUniform1fv(location, count, value);
@@ -393,19 +447,78 @@ void glUniform1fv_hook(GLint location, GLsizei count, const GLfloat* value) {
 void glUniform4fv_hook(GLint location, GLsizei count, const GLfloat* value) {
     if (!o_glUniform4fv) o_glUniform4fv = (decltype(o_glUniform4fv))gl_real("glUniform4fv");
     if (!o_glUniform4fv) return;
-    if (noFadeOn() && value && count > 0) {
+    if (value && count > 0) {
         auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
-            if (g_fadeLogs.fetch_add(1) < 150)
-                LOGI("FADE4V %s prog=%u loc=%d cnt=%d v=%.3f,%.3f,%.3f,%.3f",
-                     it->second.c_str(), g_curProg, location, count, value[0], value[1], value[2], value[3]);
-            std::vector<GLfloat> tmp(value, value + count * 4);
-            for (auto& t : tmp) t = 1.0f;
-            o_glUniform4fv(location, count, tmp.data());
-            return;
+        if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+            float t;
+            if (fadeAdjust(it->second, g_curProg, location, value[0], t)) {
+                std::vector<GLfloat> tmp(value, value + count * 4);
+                for (auto& q : tmp) q = t;
+                o_glUniform4fv(location, count, tmp.data());
+                return;
+            }
         }
     }
     o_glUniform4fv(location, count, value);
+}
+
+// ---- GLES 3.1 的 DSA 版本: 程序号是参数, 不走 g_curProg ----
+void glProgramUniform1f_hook(GLuint program, GLint location, GLfloat v0) {
+    if (!o_glProgramUniform1f) o_glProgramUniform1f = (PFN_PU1F)gl_real("glProgramUniform1f");
+    if (!o_glProgramUniform1f) return;
+    auto it = g_uniByLoc.find(((uint64_t)program << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+        float t;
+        if (fadeAdjust(it->second, program, location, v0, t)) v0 = t;
+    }
+    o_glProgramUniform1f(program, location, v0);
+}
+
+void glProgramUniform1fv_hook(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    if (!o_glProgramUniform1fv) o_glProgramUniform1fv = (PFN_PU1FV)gl_real("glProgramUniform1fv");
+    if (!o_glProgramUniform1fv) return;
+    if (value && count > 0) {
+        auto it = g_uniByLoc.find(((uint64_t)program << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+            float t;
+            if (fadeAdjust(it->second, program, location, value[0], t)) {
+                std::vector<GLfloat> tmp(value, value + count);
+                for (auto& q : tmp) q = t;
+                o_glProgramUniform1fv(program, location, count, tmp.data());
+                return;
+            }
+        }
+    }
+    o_glProgramUniform1fv(program, location, count, value);
+}
+
+void glProgramUniform4f_hook(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
+    if (!o_glProgramUniform4f) o_glProgramUniform4f = (PFN_PU4F)gl_real("glProgramUniform4f");
+    if (!o_glProgramUniform4f) return;
+    auto it = g_uniByLoc.find(((uint64_t)program << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+        float t;
+        if (fadeAdjust(it->second, program, location, v0, t)) { v0 = t; v1 = t; v2 = t; v3 = t; }
+    }
+    o_glProgramUniform4f(program, location, v0, v1, v2, v3);
+}
+
+void glProgramUniform4fv_hook(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    if (!o_glProgramUniform4fv) o_glProgramUniform4fv = (PFN_PU4FV)gl_real("glProgramUniform4fv");
+    if (!o_glProgramUniform4fv) return;
+    if (value && count > 0) {
+        auto it = g_uniByLoc.find(((uint64_t)program << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end() && isFadeCand(it->second)) {
+            float t;
+            if (fadeAdjust(it->second, program, location, value[0], t)) {
+                std::vector<GLfloat> tmp(value, value + count * 4);
+                for (auto& q : tmp) q = t;
+                o_glProgramUniform4fv(program, location, count, tmp.data());
+                return;
+            }
+        }
+    }
+    o_glProgramUniform4fv(program, location, count, value);
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2371,6 +2484,10 @@ const Entry kEntries[] = {
     {"glUniform4f",             (void*)&glUniform4f_hook,             (void**)&o_glUniform4f},
     {"glUniform1fv",            (void*)&glUniform1fv_hook,            (void**)&o_glUniform1fv},
     {"glUniform4fv",            (void*)&glUniform4fv_hook,            (void**)&o_glUniform4fv},
+    {"glProgramUniform1f",      (void*)&glProgramUniform1f_hook,      (void**)&o_glProgramUniform1f},
+    {"glProgramUniform1fv",     (void*)&glProgramUniform1fv_hook,     (void**)&o_glProgramUniform1fv},
+    {"glProgramUniform4f",      (void*)&glProgramUniform4f_hook,      (void**)&o_glProgramUniform4f},
+    {"glProgramUniform4fv",     (void*)&glProgramUniform4fv_hook,     (void**)&o_glProgramUniform4fv},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
