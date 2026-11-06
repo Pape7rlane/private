@@ -156,6 +156,43 @@ hash = crc32c(hash, &D3D11_BUFFER_DESC, 24);
    不是 58206 个 u16。按 u16 解析等于把每个索引拆成高低字节，三角形全乱连，模型炸成放射状尖刺。
    patch.txt 要写 `ib 84ba7549 March7thHairA.ib 0 29103 u32`。
 
+### 3.6 角色全局去虚化（2026-11-06）
+
+相机贴近角色 / 视角往下压时，角色会 dither 渐隐成空气。目标是做成可开关的全局功能。
+
+#### 定位过程
+
+1. 先怀疑景深 → 游戏 prefs 里没有 DOF 开关，排除。
+2. dump 全部 `glShaderSource` → 242 段全是 **compute shader**（138 个），渲染用的 vertex/fragment 是预编译二进制，走不到这个入口，改不了源码。
+3. 改成 dump **uniform 名字**：hook `glGetUniformLocation` 建 `(program,location) → name` 表，再在 `glUniform*` 里反查。
+4. 三轮试探：
+   - 第一轮 `_OneMinusOpacityDitherScale` → 命中，但值**恒为 0.0000**，不是变量。
+   - 第二轮 `_AlphaOutside` → 命中，值**恒为 1.0000**，也不是变量。
+   - 第三轮加 `glUniform1fv` / `glUniform4fv`（数组版），同时记录每次设置的值 → **命中**。
+
+#### 结论
+
+| uniform | program / loc | 值 |
+|---|---|---|
+| `_OneMinusOpacityDitherScale` | 824/5、835/5、953/4 | 恒 0.0000 |
+| `_AlphaOutside` | 1016/13 | 恒 1.0000 |
+| `_AlphaIntensity` | 1278/48 | 恒 2.0000 |
+| `_AlphaRange` | 1278/49 | 恒 1.0000 |
+| **`_AlphaInside`** | **1019/14** | **1.0000 → 0.1180（拉近时）** |
+
+真正随相机距离变化的是 **`_AlphaInside`**，而且它走的是 `glUniform1fv`（count=1 的数组版），
+不是 `glUniform1f` —— 只 hook 标量版会完全看不到。
+
+#### 实现
+
+- `patch.txt` 里加 `nofade on|off`（热重载，改完 1 秒内生效）。
+- 模块 App 里加「角色全局去虚化」开关，存 `shared_prefs/hsrprobe.xml` 的 `nofade`。
+  游戏进程用 `XSharedPreferences` 轮询（LSPosed 代读别的应用私有目录，不受 SELinux 限制），
+  变化时经 JNI `nativeSetNoFade` 推给探针。
+- 两个来源取或：`g_noFadeApp || g_noFadePatch`。
+- 生效时把 `_AlphaInside` 钉在 `1.0`（`glUniform1f` / `4f` / `1fv` / `4fv` 四个入口都拦）。
+  因为是逐帧逐 draw 拦，**传送地图、切场景也一样生效**，不需要重启游戏。
+
 #### 2026-11-04 傍晚：找到骨骼矩阵的入口
 
 `libunity.so` 没有被完全 strip（431 个导出函数），里面有 Unity 的 CPU 蒙皮实现：
@@ -242,6 +279,9 @@ texstat  <ib_hash>                     # 打印各纹理单元的绑定与尺寸
 
 # 跳过
 skip / skipall / skipcnt <min> <max>
+
+# 全局去虚化（角色贴近相机不再淡出）
+nofade on|off
 ~~~
 
 ## 五、构建与使用

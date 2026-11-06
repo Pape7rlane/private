@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <GLES3/gl3.h>
+#include <jni.h>
 
 #include "dobby.h"
 #define BCDEC_IMPLEMENTATION
@@ -303,6 +304,12 @@ std::unordered_set<std::string> g_uniDumped;
 // (program << 32) | location -> 名字, 供 glUniform1f 反查
 std::unordered_map<uint64_t, std::string> g_uniByLoc;
 static std::atomic<int> g_fadeLogs{0};
+// 全局去虚化开关: 两个来源取或.
+//   g_noFadeApp   — 模块 App 里的开关, 由 JNI 推过来
+//   g_noFadePatch — patch.txt 里的 "nofade on|off"
+static std::atomic<bool> g_noFadeApp{false};
+static std::atomic<bool> g_noFadePatch{false};
+static inline bool noFadeOn() { return g_noFadeApp.load() || g_noFadePatch.load(); }
 
 GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     // RESOLVE 里的 return; 在非 void 函数里不合法, 这里手写解析
@@ -326,8 +333,9 @@ GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     return loc;
 }
 
-// 角色近距离淡出: 崩铁用 dither 做渐隐, _OneMinusOpacityDitherScale 是它的强度.
-// 强制成 0 = 完全不透明, 角色不再随相机靠近而消失.
+// 角色近距离淡出: 崩铁用 dither 做渐隐, 真正随相机距离变化的是 _AlphaInside
+// (实测 prog=1019 从 1.0000 掉到 0.1180, 其余 _Alpha* 都是常量).
+// 开关打开时把 _AlphaInside 钉在 1.0, 角色就不再随相机贴近而消失.
 
 void glUniform1f_hook(GLint location, GLfloat v0) {
     static std::atomic<long> g_u1f{0};
@@ -335,19 +343,15 @@ void glUniform1f_hook(GLint location, GLfloat v0) {
     if (c == 0) LOGI("U1F first call map=%zu prog=%u", g_uniByLoc.size(), g_curProg);
     if (!o_glUniform1f) o_glUniform1f = (decltype(o_glUniform1f))gl_real("glUniform1f");
     if (!o_glUniform1f) return;
-    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-    if (it != g_uniByLoc.end()) {
-        const std::string& n = it->second;
-        if (n == "_OneMinusOpacityDitherScale") {
-            if (g_fadeLogs.fetch_add(1) < 40)
-                LOGI("FADE %s prog=%u loc=%d val=%.4f -> 0", n.c_str(), g_curProg, location, v0);
-            v0 = 0.0f;
-        } else if (n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange" ||
-                   n == "_AlphaIntensity") {
-            // 相机贴近时角色淡出: 这几个是内外侧 alpha 和淡出区间
-            if (g_fadeLogs.fetch_add(1) < 60)
-                LOGI("ALPHA %s prog=%u loc=%d val=%.4f", n.c_str(), g_curProg, location, v0);
-            if (n == "_AlphaInside") v0 = 1.0f;   // 内侧也保持不透明
+    if (noFadeOn()) {
+        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end()) {
+            const std::string& n = it->second;
+            if (n == "_AlphaInside") {
+                if (g_fadeLogs.fetch_add(1) < 40)
+                    LOGI("FADE %s prog=%u loc=%d val=%.4f -> 1", n.c_str(), g_curProg, location, v0);
+                v0 = 1.0f;
+            }
         }
     }
     o_glUniform1f(location, v0);
@@ -356,33 +360,27 @@ void glUniform1f_hook(GLint location, GLfloat v0) {
 void glUniform4f_hook(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
     if (!o_glUniform4f) o_glUniform4f = (decltype(o_glUniform4f))gl_real("glUniform4f");
     if (!o_glUniform4f) return;
-    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-    if (it != g_uniByLoc.end()) {
-        const std::string& n = it->second;
-        if (n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange") {
+    if (noFadeOn()) {
+        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
             if (g_fadeLogs.fetch_add(1) < 80)
-                LOGI("ALPHA4 %s prog=%u loc=%d val=%.3f,%.3f,%.3f,%.3f",
-                     n.c_str(), g_curProg, location, v0, v1, v2, v3);
-            if (n == "_AlphaInside") { v0 = 1.0f; v1 = 1.0f; v2 = 1.0f; v3 = 1.0f; }
+                LOGI("FADE4 %s prog=%u loc=%d val=%.3f,%.3f,%.3f,%.3f",
+                     it->second.c_str(), g_curProg, location, v0, v1, v2, v3);
+            v0 = 1.0f; v1 = 1.0f; v2 = 1.0f; v3 = 1.0f;
         }
     }
     o_glUniform4f(location, v0, v1, v2, v3);
 }
 
-static bool isFadeName(const std::string& n) {
-    return n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange" ||
-           n == "_AlphaIntensity" || n == "_OneMinusOpacityDitherScale";
-}
-
 void glUniform1fv_hook(GLint location, GLsizei count, const GLfloat* value) {
     if (!o_glUniform1fv) o_glUniform1fv = (decltype(o_glUniform1fv))gl_real("glUniform1fv");
     if (!o_glUniform1fv) return;
-    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-    if (it != g_uniByLoc.end() && isFadeName(it->second) && value && count > 0) {
-        const std::string& n = it->second;
-        if (g_fadeLogs.fetch_add(1) < 120)
-            LOGI("U1FV %s prog=%u loc=%d cnt=%d v0=%.4f", n.c_str(), g_curProg, location, count, value[0]);
-        if (n == "_AlphaInside") {
+    if (noFadeOn() && value && count > 0) {
+        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
+            if (g_fadeLogs.fetch_add(1) < 120)
+                LOGI("FADE1V %s prog=%u loc=%d cnt=%d v0=%.4f -> 1",
+                     it->second.c_str(), g_curProg, location, count, value[0]);
             std::vector<GLfloat> tmp(value, value + count);
             for (auto& t : tmp) t = 1.0f;
             o_glUniform1fv(location, count, tmp.data());
@@ -395,13 +393,12 @@ void glUniform1fv_hook(GLint location, GLsizei count, const GLfloat* value) {
 void glUniform4fv_hook(GLint location, GLsizei count, const GLfloat* value) {
     if (!o_glUniform4fv) o_glUniform4fv = (decltype(o_glUniform4fv))gl_real("glUniform4fv");
     if (!o_glUniform4fv) return;
-    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
-    if (it != g_uniByLoc.end() && isFadeName(it->second) && value && count > 0) {
-        const std::string& n = it->second;
-        if (g_fadeLogs.fetch_add(1) < 150)
-            LOGI("U4FV %s prog=%u loc=%d cnt=%d v=%.3f,%.3f,%.3f,%.3f",
-                 n.c_str(), g_curProg, location, count, value[0], value[1], value[2], value[3]);
-        if (n == "_AlphaInside") {
+    if (noFadeOn() && value && count > 0) {
+        auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+        if (it != g_uniByLoc.end() && it->second == "_AlphaInside") {
+            if (g_fadeLogs.fetch_add(1) < 150)
+                LOGI("FADE4V %s prog=%u loc=%d cnt=%d v=%.3f,%.3f,%.3f,%.3f",
+                     it->second.c_str(), g_curProg, location, count, value[0], value[1], value[2], value[3]);
             std::vector<GLfloat> tmp(value, value + count * 4);
             for (auto& t : tmp) t = 1.0f;
             o_glUniform4fv(location, count, tmp.data());
@@ -526,6 +523,7 @@ void load_patches() {
     g_patchMtime = mt;
     g_patchesLoaded = true;
     g_patches.clear();
+    g_noFadePatch.store(false);   // 每次重载先归零, 由 nofade 行决定
     FILE* f = fopen(p.c_str(), "r");
     if (!f) { LOGI("no patch.txt"); return; }
     char line[512];
@@ -537,7 +535,13 @@ void load_patches() {
         int n = sscanf(s, "%31s %63s %63s %63s %63s %63s %63s %63s", cmd, a1, a2, a3, a4, a5, a6, a7);
         if (n < 1) continue;
         Patch pt;
-        if (!strcmp(cmd, "skipall")) {
+        if (!strcmp(cmd, "nofade")) {
+            // nofade on|off  — 全局去虚化开关, 不改动 g_patches
+            bool on = (n >= 2) && (!strcmp(a1, "on") || !strcmp(a1, "1") || !strcmp(a1, "true"));
+            g_noFadePatch.store(on);
+            LOGI("patch nofade=%d", (int)on);
+            continue;
+        } else if (!strcmp(cmd, "skipall")) {
             pt.action = 3;
         } else if (!strcmp(cmd, "skipcnt")) {
             if (n < 3) continue;
@@ -2608,3 +2612,15 @@ void gles_probe_start(const char* out_dir) {
     }).detach();
 }
 
+
+// ---- 应用内开关: 模块 App 的「角色去虚化」开关经 JNI 直接推给探针 ----
+extern "C" JNIEXPORT void JNICALL
+Java_com_hsrprobe_NativeLoader_nativeSetNoFade(JNIEnv*, jclass, jboolean on) {
+    g_noFadeApp.store(on == JNI_TRUE);
+    LOGI("nofade=%d (from app)", (int)(on == JNI_TRUE));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_hsrprobe_NativeLoader_nativeGetNoFade(JNIEnv*, jclass) {
+    return noFadeOn() ? JNI_TRUE : JNI_FALSE;
+}
