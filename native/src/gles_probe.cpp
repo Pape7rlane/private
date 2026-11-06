@@ -1188,7 +1188,10 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 }
                 g_vbBinds.clear();
                 for (auto& uv : pt.uvBinds) { VbBind vb; vb.idx = uv.first; vb.newBuf = uv.second; g_vbBinds.push_back(vb); }
-                { VbBind vb; vb.idx = pp; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+                // 和位置共用 buffer 的属性一起换, 否则位置和骨骼权重会分家
+                for (int i = 0; i < 16; i++)
+                    if (lb[i].enabled && lb[i].buf == aa.buf)
+                        { VbBind vb; vb.idx = i; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
                 continue;
             }
             LiveAttr la[16];
@@ -1208,12 +1211,13 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             const uint32_t newVcount = modVerts > vcount ? modVerts : vcount;
             if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
             // 只在主渲染 pass 上初始化: 必须有 UV 属性
-            // 安卓的 UV 可能是 float, 也可能是量化后的 u16 normalized
+            // 安卓的 UV 可能是 float / half float / 量化 u16
             if (!pt.blend.empty()) {
                 int uvCnt = 0;
                 for (int i = 0; i < 16; i++)
                     if (la[i].enabled && la[i].size == 2 &&
-                        (la[i].type == GL_FLOAT || la[i].type == GL_UNSIGNED_SHORT)) uvCnt++;
+                        (la[i].type == GL_FLOAT || la[i].type == GL_HALF_FLOAT ||
+                         la[i].type == GL_UNSIGNED_SHORT)) uvCnt++;
                 if (!uvCnt) continue;
             }
             pt.done = true;
@@ -1323,6 +1327,34 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 pt.dynMap[v] = bi;
             }
             LOGI("vbstatic nn map done: %zu verts, %zu unmatched", n, miss);
+            // mod 顶点比原版多时, 多出来的顶点没有对应权重:
+            // 用最近邻映射把原版同一 buffer 里的非位置属性(骨骼索引/权重、法线等)搬过来,
+            // 否则后半段顶点会按循环复制的权重乱飞.
+            if (newVcount > vcount) {
+                for (int ai = 0; ai < 16; ai++) {
+                    if (!la[ai].enabled || ai == pos) continue;
+                    if (la[ai].buf != a.buf) continue;
+                    const size_t ap = (size_t)(uintptr_t)la[ai].ptr;
+                    size_t bytes = 0;
+                    switch (la[ai].type) {
+                        case GL_BYTE: case GL_UNSIGNED_BYTE:
+                            bytes = (size_t)la[ai].size; break;
+                        case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT:
+                            bytes = (size_t)la[ai].size * 2; break;
+                        case GL_FLOAT:
+                            bytes = (size_t)la[ai].size * 4; break;
+                        default: continue;
+                    }
+                    if (!bytes || ap + bytes > (size_t)a.stride) continue;
+                    for (size_t v = 0; v < n; v++) {
+                        uint32_t ri = pt.dynMap[v];
+                        if (ri >= vcount) ri = 0;
+                        memcpy(outb.data() + ap + v * (size_t)a.stride,
+                               cur.data() + ap + (size_t)ri * (size_t)a.stride, bytes);
+                    }
+                    LOGI("vbstatic carry attr%d (%zu bytes) via nn map", ai, bytes);
+                }
+            }
             pt.refCenter[0] = pt.refCenter[1] = pt.refCenter[2] = 0.0f;
             {
                 size_t cntr = 0;
@@ -1446,13 +1478,14 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 LOGI("vbstatic uv src stride=%zu verts=%zu", uvSrcStride, nuv);
                 for (int i = 0; i < 16; i++) {
                     if (!la[i].enabled || la[i].size != 2) continue;
-                    const bool u16 = (la[i].type == GL_UNSIGNED_SHORT);
-                    if (!u16 && la[i].type != GL_FLOAT) continue;
+                    const bool u16  = (la[i].type == GL_UNSIGNED_SHORT);
+                    const bool half = (la[i].type == GL_HALF_FLOAT);
+                    if (!u16 && !half && la[i].type != GL_FLOAT) continue;
                     if (!la[i].buf || la[i].stride <= 0) continue;
                     const size_t uoff = (size_t)(uintptr_t)la[i].ptr;
                     // 单套 UV (源 stride 8) 从 0 开始; 双套 (源 stride 20) 按属性偏移选
                     const size_t srcOff = (uvSrcStride >= 16) ? ((uoff >= 12) ? 12 : 4) : 0;
-                    const size_t wbytes = u16 ? 4 : 8;
+                    const size_t wbytes = (u16 || half) ? 4 : 8;
                     if (uoff + wbytes > (size_t)la[i].stride) continue;
                     const size_t unw = uoff + (size_t)vcount * (size_t)la[i].stride;
                     if (unw > (16u << 20)) continue;
@@ -1476,23 +1509,37 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     for (size_t v = 0; v < cnt; v++) {
                         const float* sp = (const float*)(pt.blend.data() + v * uvSrcStride + srcOff);
                         uint8_t* dp = ub.data() + uoff + v * (size_t)la[i].stride;
-                        float u, w;
-                        if (pt.flipV == 2) { u = 0.5f; w = 0.5f; }
-                        else if (pt.flipV == 3) { u = 0.02f; w = 0.02f; }
-                        else { u = sp[0]; w = pt.flipV ? (1.0f - sp[1]) : sp[1]; }
-                        if (u16) {
-                            // 量化 UV: 0..1 映射到 0..65535
-                            float c2[2] = {u, w};
+                        float uv[2];
+                        if (pt.flipV == 2) { uv[0] = 0.5f; uv[1] = 0.5f; }
+                        else if (pt.flipV == 3) { uv[0] = 0.02f; uv[1] = 0.02f; }
+                        else { uv[0] = sp[0]; uv[1] = pt.flipV ? (1.0f - sp[1]) : sp[1]; }
+                        if (half) {
+                            // float -> half, UV 限定在 0..1 不会溢出
                             uint16_t* d16 = (uint16_t*)dp;
                             for (int k = 0; k < 2; k++) {
-                                float t = c2[k];
+                                float t = uv[k];
+                                if (!(t > 0.0f)) t = 0.0f;
+                                if (t > 1.0f) t = 1.0f;
+                                uint32_t x; memcpy(&x, &t, 4);
+                                uint32_t sg = (x >> 16) & 0x8000u;
+                                int32_t e = (int32_t)((x >> 23) & 0xffu) - 112;
+                                uint32_t m = x & 0x7fffffu;
+                                if (e <= 0) d16[k] = (uint16_t)sg;
+                                else if (e >= 31) d16[k] = (uint16_t)(sg | 0x7c00u);
+                                else d16[k] = (uint16_t)(sg | ((uint32_t)e << 10) | (m >> 13));
+                            }
+                        } else if (u16) {
+                            // 量化 UV: 0..1 映射到 0..65535
+                            uint16_t* d16 = (uint16_t*)dp;
+                            for (int k = 0; k < 2; k++) {
+                                float t = uv[k];
                                 if (!(t > 0.0f)) t = 0.0f;
                                 if (t > 1.0f) t = 1.0f;
                                 d16[k] = (uint16_t)(t * 65535.0f + 0.5f);
                             }
                         } else {
-                            ((float*)dp)[0] = u;
-                            ((float*)dp)[1] = w;
+                            ((float*)dp)[0] = uv[0];
+                            ((float*)dp)[1] = uv[1];
                         }
                     }
                     GLuint nub = 0;
@@ -1505,7 +1552,12 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     LOGI("vbstatic uv attr=%d off=%zu stride=%d verts=%zu buf=%u flipV=%d", i, uoff, la[i].stride, cnt, nub, pt.flipV);
                 }
             }
-            { VbBind vb; vb.idx = pos; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb); }
+            // 和位置共用同一个 buffer 的属性(骨骼索引/权重、法线)一起换到新 buffer,
+            // 否则位置和权重会分家, 蒙皮结果完全错乱
+            for (int i = 0; i < 16; i++) {
+                if (!la[i].enabled || la[i].buf != a.buf) continue;
+                VbBind vb; vb.idx = i; vb.newBuf = pt.glBuf; g_vbBinds.push_back(vb);
+            }
             continue;
         }
         if (pt.action == 12) {
