@@ -1487,21 +1487,23 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     const size_t srcOff = (uvSrcStride >= 16) ? ((uoff >= 12) ? 12 : 4) : 0;
                     const size_t wbytes = (u16 || half) ? 4 : 8;
                     if (uoff + wbytes > (size_t)la[i].stride) continue;
-                    const size_t unw = uoff + (size_t)vcount * (size_t)la[i].stride;
+                    // 注意: uoff 是 stride 内部偏移, 不能加到总长度上,
+                    // 否则 map 长度超过 buffer 实际大小, glMapBufferRange 直接返回 NULL
+                    const size_t unw = (size_t)vcount * (size_t)la[i].stride;
                     if (unw > (16u << 20)) continue;
                     GLuint sv = g_curArray;
                     o_glBindBuffer(GL_ARRAY_BUFFER, la[i].buf);
                     void* up = o_glMapBufferRange ? o_glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)unw, GL_MAP_READ_BIT) : nullptr;
-                    if (!up) { o_glBindBuffer(GL_ARRAY_BUFFER, sv); continue; }
+                    if (!up) { LOGW("vbstatic uv map fail attr=%d len=%zu", i, unw); o_glBindBuffer(GL_ARRAY_BUFFER, sv); continue; }
                     std::vector<uint8_t> ub((const uint8_t*)up, (const uint8_t*)up + unw);
                     if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
                     // 顶点数扩展: 原 UV 按模循环铺满新长度
                     if (newVcount > vcount) {
-                        std::vector<uint8_t> ub2(uoff + (size_t)newVcount * (size_t)la[i].stride, 0);
+                        std::vector<uint8_t> ub2((size_t)newVcount * (size_t)la[i].stride, 0);
                         for (uint32_t v = 0; v < newVcount; v++)
-                            memcpy(ub2.data() + uoff + (size_t)v * (size_t)la[i].stride,
-                                   ub.data() + uoff + (size_t)(v % vcount) * (size_t)la[i].stride,
+                            memcpy(ub2.data() + (size_t)v * (size_t)la[i].stride,
+                                   ub.data() + (size_t)(v % vcount) * (size_t)la[i].stride,
                                    (size_t)la[i].stride);
                         ub.swap(ub2);
                     }
