@@ -153,6 +153,8 @@ decltype(&glShaderSource)    o_glShaderSource    = nullptr;
 decltype(&glGetUniformLocation) o_glGetUniformLocation = nullptr;
 decltype(&glUniform1f)       o_glUniform1f       = nullptr;
 decltype(&glUniform4f)       o_glUniform4f       = nullptr;
+decltype(&glUniform1fv)      o_glUniform1fv      = nullptr;
+decltype(&glUniform4fv)      o_glUniform4fv      = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -300,6 +302,7 @@ void glShaderSource_hook(GLuint shader, GLsizei count, const GLchar* const* stri
 std::unordered_set<std::string> g_uniDumped;
 // (program << 32) | location -> 名字, 供 glUniform1f 反查
 std::unordered_map<uint64_t, std::string> g_uniByLoc;
+static std::atomic<int> g_fadeLogs{0};
 
 GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     // RESOLVE 里的 return; 在非 void 函数里不合法, 这里手写解析
@@ -310,6 +313,10 @@ GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
     if (name && loc >= 0) {
         std::string n(name);
         g_uniByLoc[((uint64_t)program << 32) | (uint32_t)loc] = n;
+        if (n.find("_Alpha") != std::string::npos && g_fadeLogs.load() < 30) {
+            g_fadeLogs.fetch_add(1);
+            LOGI("ULOC %s prog=%u loc=%d", n.c_str(), program, loc);
+        }
         if (g_uniDumped.size() < 8000 && g_uniDumped.insert(n).second) {
             std::string path = std::string(g_dir) + "/uniforms.txt";
             FILE* f = fopen(path.c_str(), "a");
@@ -321,9 +328,11 @@ GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
 
 // 角色近距离淡出: 崩铁用 dither 做渐隐, _OneMinusOpacityDitherScale 是它的强度.
 // 强制成 0 = 完全不透明, 角色不再随相机靠近而消失.
-static std::atomic<int> g_fadeLogs{0};
 
 void glUniform1f_hook(GLint location, GLfloat v0) {
+    static std::atomic<long> g_u1f{0};
+    long c = g_u1f.fetch_add(1);
+    if (c == 0) LOGI("U1F first call map=%zu prog=%u", g_uniByLoc.size(), g_curProg);
     if (!o_glUniform1f) o_glUniform1f = (decltype(o_glUniform1f))gl_real("glUniform1f");
     if (!o_glUniform1f) return;
     auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
@@ -358,6 +367,48 @@ void glUniform4f_hook(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloa
         }
     }
     o_glUniform4f(location, v0, v1, v2, v3);
+}
+
+static bool isFadeName(const std::string& n) {
+    return n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange" ||
+           n == "_AlphaIntensity" || n == "_OneMinusOpacityDitherScale";
+}
+
+void glUniform1fv_hook(GLint location, GLsizei count, const GLfloat* value) {
+    if (!o_glUniform1fv) o_glUniform1fv = (decltype(o_glUniform1fv))gl_real("glUniform1fv");
+    if (!o_glUniform1fv) return;
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeName(it->second) && value && count > 0) {
+        const std::string& n = it->second;
+        if (g_fadeLogs.fetch_add(1) < 120)
+            LOGI("U1FV %s prog=%u loc=%d cnt=%d v0=%.4f", n.c_str(), g_curProg, location, count, value[0]);
+        if (n == "_AlphaInside") {
+            std::vector<GLfloat> tmp(value, value + count);
+            for (auto& t : tmp) t = 1.0f;
+            o_glUniform1fv(location, count, tmp.data());
+            return;
+        }
+    }
+    o_glUniform1fv(location, count, value);
+}
+
+void glUniform4fv_hook(GLint location, GLsizei count, const GLfloat* value) {
+    if (!o_glUniform4fv) o_glUniform4fv = (decltype(o_glUniform4fv))gl_real("glUniform4fv");
+    if (!o_glUniform4fv) return;
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end() && isFadeName(it->second) && value && count > 0) {
+        const std::string& n = it->second;
+        if (g_fadeLogs.fetch_add(1) < 150)
+            LOGI("U4FV %s prog=%u loc=%d cnt=%d v=%.3f,%.3f,%.3f,%.3f",
+                 n.c_str(), g_curProg, location, count, value[0], value[1], value[2], value[3]);
+        if (n == "_AlphaInside") {
+            std::vector<GLfloat> tmp(value, value + count * 4);
+            for (auto& t : tmp) t = 1.0f;
+            o_glUniform4fv(location, count, tmp.data());
+            return;
+        }
+    }
+    o_glUniform4fv(location, count, value);
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2314,6 +2365,8 @@ const Entry kEntries[] = {
     {"glGetUniformLocation",    (void*)&glGetUniformLocation_hook,    (void**)&o_glGetUniformLocation},
     {"glUniform1f",             (void*)&glUniform1f_hook,             (void**)&o_glUniform1f},
     {"glUniform4f",             (void*)&glUniform4f_hook,             (void**)&o_glUniform4f},
+    {"glUniform1fv",            (void*)&glUniform1fv_hook,            (void**)&o_glUniform1fv},
+    {"glUniform4fv",            (void*)&glUniform4fv_hook,            (void**)&o_glUniform4fv},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
