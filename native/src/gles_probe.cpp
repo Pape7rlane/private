@@ -152,6 +152,7 @@ decltype(&glUseProgram)      o_glUseProgram      = nullptr;
 decltype(&glShaderSource)    o_glShaderSource    = nullptr;
 decltype(&glGetUniformLocation) o_glGetUniformLocation = nullptr;
 decltype(&glUniform1f)       o_glUniform1f       = nullptr;
+decltype(&glUniform4f)       o_glUniform4f       = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -332,9 +333,31 @@ void glUniform1f_hook(GLint location, GLfloat v0) {
             if (g_fadeLogs.fetch_add(1) < 40)
                 LOGI("FADE %s prog=%u loc=%d val=%.4f -> 0", n.c_str(), g_curProg, location, v0);
             v0 = 0.0f;
+        } else if (n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange" ||
+                   n == "_AlphaIntensity") {
+            // 相机贴近时角色淡出: 这几个是内外侧 alpha 和淡出区间
+            if (g_fadeLogs.fetch_add(1) < 60)
+                LOGI("ALPHA %s prog=%u loc=%d val=%.4f", n.c_str(), g_curProg, location, v0);
+            if (n == "_AlphaInside") v0 = 1.0f;   // 内侧也保持不透明
         }
     }
     o_glUniform1f(location, v0);
+}
+
+void glUniform4f_hook(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
+    if (!o_glUniform4f) o_glUniform4f = (decltype(o_glUniform4f))gl_real("glUniform4f");
+    if (!o_glUniform4f) return;
+    auto it = g_uniByLoc.find(((uint64_t)g_curProg << 32) | (uint32_t)location);
+    if (it != g_uniByLoc.end()) {
+        const std::string& n = it->second;
+        if (n == "_AlphaInside" || n == "_AlphaOutside" || n == "_AlphaRange") {
+            if (g_fadeLogs.fetch_add(1) < 80)
+                LOGI("ALPHA4 %s prog=%u loc=%d val=%.3f,%.3f,%.3f,%.3f",
+                     n.c_str(), g_curProg, location, v0, v1, v2, v3);
+            if (n == "_AlphaInside") { v0 = 1.0f; v1 = 1.0f; v2 = 1.0f; v3 = 1.0f; }
+        }
+    }
+    o_glUniform4f(location, v0, v1, v2, v3);
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2290,6 +2313,7 @@ const Entry kEntries[] = {
     {"glShaderSource",          (void*)&glShaderSource_hook,          (void**)&o_glShaderSource},
     {"glGetUniformLocation",    (void*)&glGetUniformLocation_hook,    (void**)&o_glGetUniformLocation},
     {"glUniform1f",             (void*)&glUniform1f_hook,             (void**)&o_glUniform1f},
+    {"glUniform4f",             (void*)&glUniform4f_hook,             (void**)&o_glUniform4f},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
