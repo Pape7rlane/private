@@ -1203,6 +1203,9 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 size_t in = it->second.data.size() / 2;
                 for (size_t k = 0; k < in; k++) if ((uint32_t)ip[k] + 1u > vcount) vcount = (uint32_t)ip[k] + 1u;
             }
+            // mod 是高模, 顶点数可能多于安卓原版; 新 buffer 取两者较大值
+            const uint32_t modVerts  = (uint32_t)(pt.ib.size() / 40);
+            const uint32_t newVcount = modVerts > vcount ? modVerts : vcount;
             if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
             // 只在主渲染 pass 上初始化: 必须有 UV 属性
             if (!pt.blend.empty()) {
@@ -1237,7 +1240,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 }
             }
             // mod 包围盒（置换后）
-            const size_t n = std::min((size_t)vcount, pt.ib.size() / 40);
+            const size_t n = std::min((size_t)newVcount, (size_t)modVerts);
             float mmin[3] = {1e30f,1e30f,1e30f}, mmax[3] = {-1e30f,-1e30f,-1e30f};
             std::vector<float> mv(n * 3);
             for (size_t v = 0; v < n; v++) {
@@ -1257,7 +1260,17 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             LOGI("vbstatic bbox ref X %.3f..%.3f Y %.3f..%.3f Z %.3f..%.3f", rmin[0],rmax[0],rmin[1],rmax[1],rmin[2],rmax[2]);
             LOGI("vbstatic bbox mod X %.3f..%.3f Y %.3f..%.3f Z %.3f..%.3f scale=%.4f", mmin[0],mmax[0],mmin[1],mmax[1],mmin[2],mmax[2], sc);
 
-            std::vector<uint8_t> outb = cur;
+            // 新顶点数可能大于原版: 其余属性按模循环铺满, 再覆盖 mod 的位置
+            std::vector<uint8_t> outb;
+            if (newVcount > vcount) {
+                outb.assign(off + (size_t)newVcount * (size_t)a.stride, 0);
+                for (uint32_t v = 0; v < newVcount; v++)
+                    memcpy(outb.data() + off + (size_t)v * (size_t)a.stride,
+                           cur.data() + off + (size_t)(v % vcount) * (size_t)a.stride,
+                           (size_t)a.stride);
+            } else {
+                outb = cur;
+            }
             for (size_t v = 0; v < n; v++) {
                 float* dst = (float*)(outb.data() + off + v * (size_t)a.stride);
                 dst[0] = (mv[v*3+0] - mmin[0]) * sc + rmin[0];
@@ -1387,7 +1400,7 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 const float* d = (const float*)(pt.dynBuf.data() + off + v * (size_t)a.stride);
                 pt.dynBase[v*3+0] = d[0]; pt.dynBase[v*3+1] = d[1]; pt.dynBase[v*3+2] = d[2];
             }
-            LOGI("vbstatic built buf=%u verts=%u/%u stride=%d", pt.glBuf, (unsigned)n, vcount, a.stride);
+            LOGI("vbstatic built buf=%u verts=%u/%u orig=%u stride=%d", pt.glBuf, (unsigned)n, newVcount, vcount, a.stride);
             if (!pt.dds.empty()) {
                 typedef void (*PFNGENTEX)(GLsizei, GLuint*);
                 typedef void (*PFNTEXPARAM)(GLenum, GLenum, GLint);
@@ -1435,7 +1448,16 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                     std::vector<uint8_t> ub((const uint8_t*)up, (const uint8_t*)up + unw);
                     if (o_glUnmapBuffer) o_glUnmapBuffer(GL_ARRAY_BUFFER);
                     o_glBindBuffer(GL_ARRAY_BUFFER, sv);
-                    const size_t cnt = std::min((size_t)vcount, nuv);
+                    // 顶点数扩展: 原 UV 按模循环铺满新长度
+                    if (newVcount > vcount) {
+                        std::vector<uint8_t> ub2(uoff + (size_t)newVcount * (size_t)la[i].stride, 0);
+                        for (uint32_t v = 0; v < newVcount; v++)
+                            memcpy(ub2.data() + uoff + (size_t)v * (size_t)la[i].stride,
+                                   ub.data() + uoff + (size_t)(v % vcount) * (size_t)la[i].stride,
+                                   (size_t)la[i].stride);
+                        ub.swap(ub2);
+                    }
+                    const size_t cnt = std::min((size_t)newVcount, nuv);
                     // 判断是 uv0 还是 uv1: 取 offset 4 为 uv0, 12 为 uv1
                     const size_t srcOff = (uoff >= 12) ? 12 : 4;
                     for (size_t v = 0; v < cnt; v++) {
