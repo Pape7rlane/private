@@ -150,6 +150,7 @@ decltype(&glGenBuffers)      o_glGenBuffers      = nullptr;
 decltype(&glDeleteBuffers)   o_glDeleteBuffers   = nullptr;
 decltype(&glUseProgram)      o_glUseProgram      = nullptr;
 decltype(&glShaderSource)    o_glShaderSource    = nullptr;
+decltype(&glGetUniformLocation) o_glGetUniformLocation = nullptr;
 decltype(&glVertexAttribPointer) o_glVertexAttribPointer = nullptr;
 decltype(&glDrawElements)    o_glDrawElements    = nullptr;
 typedef void (*PFN_DRAWEBV)(GLenum, GLsizei, GLenum, const void*, GLint);
@@ -291,6 +292,23 @@ void glShaderSource_hook(GLuint shader, GLsizei count, const GLchar* const* stri
         }
     }
     o_glShaderSource(shader, count, strings, lengths);
+}
+
+// ---- uniform 名字 dump: 渲染 shader 是预编译二进制, 只能靠 uniform 名字定位渐隐参数 ----
+std::unordered_set<std::string> g_uniDumped;
+
+GLint glGetUniformLocation_hook(GLuint program, const GLchar* name) {
+    RESOLVE(o_glGetUniformLocation, "glGetUniformLocation");
+    GLint loc = o_glGetUniformLocation(program, name);
+    if (name && loc >= 0 && g_uniDumped.size() < 8000) {
+        std::string n(name);
+        if (g_uniDumped.insert(n).second) {
+            std::string path = std::string(g_dir) + "/uniforms.txt";
+            FILE* f = fopen(path.c_str(), "a");
+            if (f) { fprintf(f, "%s\t%d\t%u\n", n.c_str(), loc, program); fclose(f); }
+        }
+    }
+    return loc;
 }
 
 void glVertexAttribPointer_hook(GLuint index, GLint size, GLenum type, GLboolean normalized,
@@ -2244,6 +2262,7 @@ const Entry kEntries[] = {
     {"glBufferSubData",         (void*)&glBufferSubData_hook,         (void**)&o_glBufferSubData},
     {"glUseProgram",            (void*)&glUseProgram_hook,            (void**)&o_glUseProgram},
     {"glShaderSource",          (void*)&glShaderSource_hook,          (void**)&o_glShaderSource},
+    {"glGetUniformLocation",    (void*)&glGetUniformLocation_hook,    (void**)&o_glGetUniformLocation},
     {"glVertexAttribPointer",   (void*)&glVertexAttribPointer_hook,   (void**)&o_glVertexAttribPointer},
     {"glDrawElements",          (void*)&glDrawElements_hook,          (void**)&o_glDrawElements},
     {"glDrawElementsInstanced", (void*)&glDrawElementsInstanced_hook, (void**)&o_glDrawElementsInstanced},
