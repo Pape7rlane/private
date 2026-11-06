@@ -132,6 +132,21 @@ hash = crc32c(hash, &D3D11_BUFFER_DESC, 24);
 安卓头发是低模，mod 是高模，顶点数差 2.3 倍。`vbstatic` 原来只填 `min(原顶点, mod顶点)`，直接套会有一半索引指向垃圾数据，模型炸开。
 现在改成：新顶点 buffer 按两者较大值开，多余部分按模循环铺满原属性，再覆盖成 mod 的位置；UV 流同样处理。
 
+实机 `attrstat 84ba7549` 拿到的头发顶点布局（stride 20）：
+
+| attr | size | type | stride | ptr | 含义 |
+|---|---|---|---|---|---|
+| a0 | 3 | `0x1406` GL_FLOAT | 20 | 0 | 位置 |
+| a1 | 4 | `0x1401` GL_BYTE | 8 | 0 | 法线 + 切线 |
+| a2 | 3 | `0x1406` GL_FLOAT | 20 | 0 | 第二条位置流（双缓冲交替） |
+| a3 | 4 | `0x1401` GL_BYTE | 8 | 0 | 法线（第二套） |
+| a4 | 2 | **`0x140b` GL_UNSIGNED_SHORT** | 8 | 4 | **UV，量化 u16** |
+
+两个坑：
+1. 安卓的 UV 是 **u16 normalized**，不是 float。原来只认 `GL_FLOAT`，UV 整段被跳过 → 位置换了但贴图采样用原 UV，头发变成红白杂乱色块。
+2. mod 的 `Texcoord.buf` stride **因角色而异**：身体 20、头发 8（`76400 / 9550 = 8`）。原来写死 20，头发解析全错。
+   现在按 `blend.size() / modVerts` 反推，整除且 ≥8 才采用，否则回退 20。
+
 #### 2026-11-04 傍晚：找到骨骼矩阵的入口
 
 `libunity.so` 没有被完全 strip（431 个导出函数），里面有 Unity 的 CPU 蒙皮实现：

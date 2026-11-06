@@ -1208,10 +1208,12 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
             const uint32_t newVcount = modVerts > vcount ? modVerts : vcount;
             if (pos < 0 || !vcount || pt.ib.size() < 40 || !o_glMapBufferRange || !o_glBufferData) continue;
             // 只在主渲染 pass 上初始化: 必须有 UV 属性
+            // 安卓的 UV 可能是 float, 也可能是量化后的 u16 normalized
             if (!pt.blend.empty()) {
                 int uvCnt = 0;
                 for (int i = 0; i < 16; i++)
-                    if (la[i].enabled && la[i].size == 2 && la[i].type == GL_FLOAT) uvCnt++;
+                    if (la[i].enabled && la[i].size == 2 &&
+                        (la[i].type == GL_FLOAT || la[i].type == GL_UNSIGNED_SHORT)) uvCnt++;
                 if (!uvCnt) continue;
             }
             pt.done = true;
@@ -1432,13 +1434,26 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                 }
             }
             g_vbBinds.clear();
-            // UV 替换: mod Texcoord stride 20 -> uv0@4, uv1@12
+            // UV 替换: mod 的 Texcoord stride 因角色而异 (身体 20, 头发 8)
             if (!pt.blend.empty()) {
-                const size_t nuv = pt.blend.size() / 20;
+                // 用顶点数反推源 stride, 整除才可信, 否则回退 20
+                size_t uvSrcStride = 20;
+                if (modVerts && (pt.blend.size() % modVerts) == 0) {
+                    size_t s = pt.blend.size() / modVerts;
+                    if (s >= 8) uvSrcStride = s;
+                }
+                const size_t nuv = pt.blend.size() / uvSrcStride;
+                LOGI("vbstatic uv src stride=%zu verts=%zu", uvSrcStride, nuv);
                 for (int i = 0; i < 16; i++) {
-                    if (!la[i].enabled || la[i].size != 2 || la[i].type != GL_FLOAT) continue;
+                    if (!la[i].enabled || la[i].size != 2) continue;
+                    const bool u16 = (la[i].type == GL_UNSIGNED_SHORT);
+                    if (!u16 && la[i].type != GL_FLOAT) continue;
                     if (!la[i].buf || la[i].stride <= 0) continue;
                     const size_t uoff = (size_t)(uintptr_t)la[i].ptr;
+                    // 单套 UV (源 stride 8) 从 0 开始; 双套 (源 stride 20) 按属性偏移选
+                    const size_t srcOff = (uvSrcStride >= 16) ? ((uoff >= 12) ? 12 : 4) : 0;
+                    const size_t wbytes = u16 ? 4 : 8;
+                    if (uoff + wbytes > (size_t)la[i].stride) continue;
                     const size_t unw = uoff + (size_t)vcount * (size_t)la[i].stride;
                     if (unw > (16u << 20)) continue;
                     GLuint sv = g_curArray;
@@ -1458,16 +1473,26 @@ int on_draw(const char* kind, GLenum mode, GLsizei count, GLenum type, const voi
                         ub.swap(ub2);
                     }
                     const size_t cnt = std::min((size_t)newVcount, nuv);
-                    // 判断是 uv0 还是 uv1: 取 offset 4 为 uv0, 12 为 uv1
-                    const size_t srcOff = (uoff >= 12) ? 12 : 4;
                     for (size_t v = 0; v < cnt; v++) {
-                        const float* sp = (const float*)(pt.blend.data() + v * 20 + srcOff);
-                        float* dp = (float*)(ub.data() + uoff + v * (size_t)la[i].stride);
-                        if (pt.flipV == 2) { dp[0] = 0.5f; dp[1] = 0.5f; }
-                        else if (pt.flipV == 3) { dp[0] = 0.02f; dp[1] = 0.02f; }
-                        else {
-                            dp[0] = sp[0];
-                            dp[1] = pt.flipV ? (1.0f - sp[1]) : sp[1];
+                        const float* sp = (const float*)(pt.blend.data() + v * uvSrcStride + srcOff);
+                        uint8_t* dp = ub.data() + uoff + v * (size_t)la[i].stride;
+                        float u, w;
+                        if (pt.flipV == 2) { u = 0.5f; w = 0.5f; }
+                        else if (pt.flipV == 3) { u = 0.02f; w = 0.02f; }
+                        else { u = sp[0]; w = pt.flipV ? (1.0f - sp[1]) : sp[1]; }
+                        if (u16) {
+                            // 量化 UV: 0..1 映射到 0..65535
+                            float c2[2] = {u, w};
+                            uint16_t* d16 = (uint16_t*)dp;
+                            for (int k = 0; k < 2; k++) {
+                                float t = c2[k];
+                                if (!(t > 0.0f)) t = 0.0f;
+                                if (t > 1.0f) t = 1.0f;
+                                d16[k] = (uint16_t)(t * 65535.0f + 0.5f);
+                            }
+                        } else {
+                            ((float*)dp)[0] = u;
+                            ((float*)dp)[1] = w;
                         }
                     }
                     GLuint nub = 0;
