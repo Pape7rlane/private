@@ -258,6 +258,10 @@ https://github.com/Pape7rlane/private/raw/dist/HSRModProbe-probe<构建号>.apk
 
 每次构建覆盖 `dist` 分支，只保留最新一个（文件名带构建号，方便对版本）。Actions 运行页面的 Summary 里也会打印这个直链。
 
+**版本号和构建号对齐**：CI 把 `github.run_number` 通过 `-PbuildNo` 传给 gradle，
+`versionCode = buildNo`、`versionName = "0.1.$buildNo"`。所以 `HSRModProbe-probe113.apk`
+装上去就是 `0.1.113`，模块界面顶部显示的就是这个值。
+
 命令行拉取：
 
 ~~~bash

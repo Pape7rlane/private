@@ -8,12 +8,15 @@ android {
     compileSdk = 34
     ndkVersion = "26.1.10909125"
 
+    // 版本号跟 CI 的 run number 对齐, 和产物名 HSRModProbe-probe<N>.apk 一致
+    val buildNo = (project.findProperty("buildNo") as String?)?.toIntOrNull() ?: 1
+
     defaultConfig {
         applicationId = "com.hsrprobe"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = buildNo
+        versionName = "0.1.$buildNo"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

@@ -10,7 +10,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val tv = TextView(this)
-        tv.text = INFO
+        val ver = try {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        } catch (t: Throwable) {
+            "?"
+        }
+        tv.text = INFO.replace("%VER%", ver ?: "?")
         tv.textSize = 13f
         tv.setPadding(56, 120, 56, 56)
         setContentView(ScrollView(this).also { it.addView(tv) })
@@ -18,7 +23,7 @@ class MainActivity : Activity() {
 
     companion object {
         private val INFO = """
-            HSRModProbe 0.1.0  (P0 probe)
+            HSRModProbe %VER%
 
             1. 在 LSPosed 里启用本模块, 作用域勾选崩坏:星穹铁道
             2. 强制停止游戏后重新启动

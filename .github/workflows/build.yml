@@ -59,7 +59,7 @@ jobs:
           fi
 
       - name: Build
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon -PbuildNo=${{ github.run_number }}
         env:
           KS_PATH: ci.jks
           KS_PASS: android
